@@ -78,6 +78,164 @@ from transformers.generation.stopping_criteria import (
 logger = logging.get_logger(__name__)
 
 
+def volume_computation3(language, video, audio):
+
+    """
+    Computes the volume for each pair of samples between language (shape [batch_size1, feature_dim])
+    and video, audio, subtitles (shape [batch_size2, feature_dim]) using the determinant of a 3x3
+    Gram matrix.
+    
+    Parameters:
+    - language (torch.Tensor): Tensor of shape (batch_size1, feature_dim) representing language features.
+    - video (torch.Tensor): Tensor of shape (batch_size2, feature_dim) representing video features.
+    - audio (torch.Tensor): Tensor of shape (batch_size2, feature_dim) representing audio features.
+    
+    Returns:
+    - torch.Tensor: Tensor of shape (batch_size1, batch_size2) representing the volume for each pair.
+    """
+
+    batch_size1 = language.shape[0]  # For language
+    batch_size2 = video.shape[0]     # For video, audio, subtitles
+
+    # Compute pairwise dot products for language with itself (shape: [batch_size1, 1])
+    ll = torch.einsum('bi,bi->b', language, language).unsqueeze(1).expand(-1, batch_size2)
+
+    # Compute pairwise dot products for language with video, audio (shape: [batch_size1, batch_size2])
+    lv = language@video.T
+    la = language@audio.T
+
+    # Compute pairwise dot products for video, audio, and subtitles with themselves and with each other
+    vv = torch.einsum('bi,bi->b', video, video).unsqueeze(0).expand(batch_size1, -1)
+    va = torch.einsum('bi,bi->b', video, audio).unsqueeze(0).expand(batch_size1, -1)
+    aa = torch.einsum('bi,bi->b', audio, audio).unsqueeze(0).expand(batch_size1, -1)
+    
+
+
+    # Stack the results to form the Gram matrix for each pair (shape: [batch_size1, batch_size2, 3, 3])
+    G = torch.stack([
+        torch.stack([ll, lv, la], dim=-1),  # First row of the Gram matrix
+        torch.stack([lv, vv, va], dim=-1),  # Second row of the Gram matrix
+        torch.stack([la, va, aa], dim=-1)  # Third row of the Gram matrix
+    ], dim=-2)
+
+    # Compute the determinant for each Gram matrix (shape: [batch_size1, batch_size2])
+    gram_det = torch.det(G.float())
+
+    # Compute the square root of the absolute value of the determinants
+    res = torch.sqrt(torch.abs(gram_det))
+    #print(res.shape)
+    return res
+
+import torch
+
+def volume_computation3_batched(language, video, audio):
+    """
+    Compute 3x3 Gram volumes for all pairs of language_i with (video_j, audio_j).
+    language: [B,H,N_lang,D]
+    video, audio: [B,H,N_vid,D]
+    Returns: [B,H,N_lang,N_vid]
+    """
+    B, H, N_lang, D = language.shape
+    N_vid = video.shape[2]
+
+    # Expand dimensions for broadcasting
+    l_exp = language[:, :, :, None, :]   # [B,H,N_lang,1,D]
+    v_exp = video[:, :, None, :, :]      # [B,H,1,N_vid,D]
+    a_exp = audio[:, :, None, :, :]      # [B,H,1,N_vid,D]
+
+    # Compute pairwise dot products
+    ll = (l_exp * l_exp).sum(-1)         # [B,H,N_lang,1]
+    lv = (l_exp * v_exp).sum(-1)         # [B,H,N_lang,N_vid]
+    la = (l_exp * a_exp).sum(-1)         # [B,H,N_lang,N_vid]
+    vv = (v_exp * v_exp).sum(-1)         # [B,H,1,N_vid]
+    va = (v_exp * a_exp).sum(-1)         # [B,H,1,N_vid]
+    aa = (a_exp * a_exp).sum(-1)         # [B,H,1,N_vid]
+
+    # Broadcast ll, vv, va, aa to shape [B,H,N_lang,N_vid]
+    ll = ll.expand(-1, -1, -1, N_vid)
+    vv = vv.expand(-1, -1, N_lang, -1)
+    va = va.expand(-1, -1, N_lang, -1)
+    aa = aa.expand(-1, -1, N_lang, -1)
+
+    # Build 3x3 Gram matrix per pair
+    G_row1 = torch.stack([ll, lv, la], dim=-1)
+    G_row2 = torch.stack([lv, vv, va], dim=-1)
+    G_row3 = torch.stack([la, va, aa], dim=-1)
+    G = torch.stack([G_row1, G_row2, G_row3], dim=-2)  # [B,H,N_lang,N_vid,3,3]
+
+    # Compute determinant per pair
+    gram_det = torch.det(G.float())      # [B,H,N_lang,N_vid]
+
+    return torch.sqrt(torch.abs(gram_det))
+
+
+
+def volume_computation_takashi_3_optimized(language, video, audio):
+    """
+    Memory-efficient version of Takashi GPU function.
+    Computes simplex volume without expanding to [B, N, D].
+    """
+
+    # language: [B, D]
+    # video, audio: [N, D]
+
+    # Compute pairwise dot products using matmul (no broadcasting!)
+    lv = language @ video.T      # [B, N]
+    la = language @ audio.T      # [B, N]
+    vv = (video * video).sum(-1)[None, :]  # [1, N]
+    aa = (audio * audio).sum(-1)[None, :]  # [1, N]
+    va = (video * audio).sum(-1)[None, :]  # [1, N]
+    ll = (language * language).sum(-1)[:, None]  # [B, 1]
+
+    # Compute dot products for the *differences*
+    v1v1 = vv + ll - 2 * lv      # (v - l)·(v - l)
+    v2v2 = aa + ll - 2 * la      # (a - l)·(a - l)
+    v1v2 = va + ll - lv - la     # (v - l)·(a - l)
+
+    # Build 2x2 Gram matrix per pair
+    G11 = v1v1
+    G12 = v1v2
+    G22 = v2v2
+
+    # Determinant of 2x2 matrix = G11*G22 - G12^2
+    det = G11 * G22 - G12 ** 2
+
+    # Volume = sqrt(det) / 6 (for tetrahedron)
+    res = torch.sqrt(torch.clamp(det, min=0.0)) / 6.0
+
+    return res  # [B, N]
+
+def volume_computation_takashi_3_optimized_batched(language, video, audio):
+    """
+    Fully batched and parallelized version.
+    language, video, audio: [B, H, N, D]
+    Returns: [B, H, N, N]
+    """
+    lv = torch.matmul(language, video.transpose(-1, -2))  # [B,H,N,N]
+    la = torch.matmul(language, audio.transpose(-1, -2))  # [B,H,N,N]
+    vv = (video * video).sum(-1)[:, :, None, :]  # [B,H,1,N]
+    aa = (audio * audio).sum(-1)[:, :, None, :]  # [B,H,1,N]
+    va = (video * audio).sum(-1)[:, :, None, :]  # [B,H,1,N]
+    ll = (language * language).sum(-1)[:, :, :, None]  # [B,H,N,1]
+    v1v1 = vv + ll - 2 * lv
+    v2v2 = aa + ll - 2 * la
+    v1v2 = va + ll - lv - la
+    det = v1v1 * v2v2 - v1v2 ** 2
+    res = torch.sqrt(torch.clamp(det, min=0.0)) / 6.0
+    return res
+
+def compute_attention_scores_parallel_takashi(query_layer, key_1_layer, key_2_layer):
+    gram_scores = volume_computation_takashi_3_optimized_batched(
+        query_layer, key_1_layer, key_2_layer
+    )
+    return -gram_scores
+
+def compute_attention_scores_parallel_gram(query_layer, key_1_layer, key_2_layer):
+    gram_scores = volume_computation3_batched(
+        query_layer, key_1_layer, key_2_layer
+    )
+    return -gram_scores
+
 class BertEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings."""
 
@@ -149,13 +307,14 @@ class BertEmbeddings(nn.Module):
 
 
 class BertSelfAttention(nn.Module):
-    def __init__(self, config, position_embedding_type=None):
+    def __init__(self, config, position_embedding_type=None, layer_num=0):
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
                 f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention "
                 f"heads ({config.num_attention_heads})"
             )
+        self.layer_num = layer_num
 
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
@@ -189,7 +348,10 @@ class BertSelfAttention(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
+        gram_attention: Optional[bool] = False,
     ) -> Tuple[torch.Tensor]:
+
+        
         mixed_query_layer = self.query(hidden_states)
 
         # If this is instantiated as a cross-attention module, the keys
@@ -198,20 +360,38 @@ class BertSelfAttention(nn.Module):
         is_cross_attention = encoder_hidden_states is not None
 
         if is_cross_attention and past_key_value is not None:
+            #print("gram_attention in BertCrossAttention pastkeys:", gram_attention)
             # reuse k,v, cross_attentions
             key_layer = past_key_value[0]
             value_layer = past_key_value[1]
             attention_mask = encoder_attention_mask
         elif is_cross_attention:
-            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
-            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
+            ##print("gram_attention in BertCrossAttention:", gram_attention)
+            if gram_attention:
+                #print("Using gram_attention cross attention")
+                key_1_layer = self.transpose_for_scores(self.key(encoder_hidden_states[:, 0, :, :]).squeeze(1))
+                value_1_layer = self.transpose_for_scores(self.value(encoder_hidden_states[:, 0, :, :]).squeeze(1))
+                key_2_layer = self.transpose_for_scores(self.key(encoder_hidden_states[:, 1, :, :]).squeeze(1))
+                value_2_layer = self.transpose_for_scores(self.value(encoder_hidden_states[:, 1, :, :]).squeeze(1))
+
+                #print("key_1_layer shape:", key_1_layer.shape)
+                #print("key_2_layer shape:", key_2_layer.shape)
+                #print("value_1_layer shape:", value_1_layer.shape)
+                #print("value_2_layer shape:", value_2_layer.shape)
+            else:
+                key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
+                value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
+                #print("key_layer shape:", key_layer.shape)
+                #print("value_layer shape:", value_layer.shape)
             attention_mask = encoder_attention_mask
         elif past_key_value is not None:
+            #print("gram_attention in pastkeys:", gram_attention)
             key_layer = self.transpose_for_scores(self.key(hidden_states))
             value_layer = self.transpose_for_scores(self.value(hidden_states))
             key_layer = torch.cat([past_key_value[0], key_layer], dim=2)
             value_layer = torch.cat([past_key_value[1], value_layer], dim=2)
         else:
+            #print("gram_attention in :", gram_attention)
             key_layer = self.transpose_for_scores(self.key(hidden_states))
             value_layer = self.transpose_for_scores(self.value(hidden_states))
 
@@ -226,10 +406,44 @@ class BertSelfAttention(nn.Module):
             # all previous decoder key/value_states. Further calls to uni-directional self-attention
             # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
             # if encoder bi-directional self-attention `past_key_value` is always `None`
-            past_key_value = (key_layer, value_layer)
+            if gram_attention:
+                #print("Saving gram_attention past_key_value")
+                past_key_value = ( (key_1_layer, key_2_layer), (value_1_layer, value_2_layer) )
+            else:
+                past_key_value = (key_layer, value_layer)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        if gram_attention and is_cross_attention:
+            #Qui aggiungere GRAM ATTENTION
+            #attention_scores_1 = torch.matmul(query_layer, key_1_layer.transpose(-1, -2))
+            #attention_scores_2 = torch.matmul(query_layer, key_2_layer.transpose(-1, -2))
+            #attention_scores = (attention_scores_1 + attention_scores_2) / 2
+            #print("attention_scores_1 shape:", attention_scores_1.shape)
+            #print("attention_scores_2 shape:", attention_scores_2.shape)
+            #print(f"Query layer shape: {query_layer.shape}")
+
+            #HERE PARALLELIZE COMPUTATION OVER BATCH DIMENSION
+            #attention_scores = compute_attention_scores_parallel_gram(
+            #    query_layer, key_1_layer, key_2_layer
+            #)
+            attention_scores = compute_attention_scores_parallel_takashi(
+                query_layer, key_1_layer, key_2_layer
+            )
+
+            #attention_scores = []
+            #for i in range(query_layer.shape[0]):
+            #    attention_for_each_head = []
+            #    for h in range(query_layer.shape[1]):
+            #        gram_scores = volume_computation_takashi_3_optimized(query_layer[i][h], key_1_layer[i][h], key_2_layer[i][h])
+            #        attention_for_each_head.append(-gram_scores)
+            #    attention_for_each_head = torch.stack(attention_for_each_head, dim=0)
+            #    attention_scores.append(attention_for_each_head)
+            #    #print(f"attention_scores for batch {i} shape:", attention_scores[-1].shape)
+            ##attention_scores = torch.stack(attention_scores, dim=0)
+            ##print("Final attention_scores shape:", attention_scores.shape)
+        else:
+            attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+            #print("attention_scores shape:", attention_scores.shape)
 
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             query_length, key_length = query_layer.shape[2], key_layer.shape[2]
@@ -264,12 +478,23 @@ class BertSelfAttention(nn.Module):
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
         attention_probs = self.dropout(attention_probs)
+        #if is_cross_attention:
+            #print("attention_probs", attention_probs.shape)
+            #print("attention_scores", attention_scores.shape)
+            #save attention probs for visualization layer after layer
+            #torch.save(attention_probs, f"attention_probs_layer_{self.layer_num}.pt")
+            #torch.save(attention_scores, f"attention_scores_layer_{self.layer_num}.pt")
 
         # Mask heads if we want to
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
-        context_layer = torch.matmul(attention_probs, value_layer)
+        if gram_attention and is_cross_attention:
+            context_layer_1 = torch.matmul(attention_probs, value_1_layer)
+            context_layer_2 = torch.matmul(attention_probs, value_2_layer)
+            context_layer = (context_layer_1 + context_layer_2) / 2    
+        else:
+            context_layer = torch.matmul(attention_probs, value_layer)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
@@ -297,9 +522,9 @@ class BertSelfOutput(nn.Module):
 
 
 class BertAttention(nn.Module):
-    def __init__(self, config, position_embedding_type=None):
+    def __init__(self, config, position_embedding_type=None, layer_num=0):
         super().__init__()
-        self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type)
+        self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type, layer_num=layer_num)
         self.output = BertSelfOutput(config)
         self.pruned_heads = set()
 
@@ -330,6 +555,7 @@ class BertAttention(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
+        gram_attention: Optional[bool] = False,
     ) -> Tuple[torch.Tensor]:
         self_outputs = self.self(
             hidden_states,
@@ -339,6 +565,7 @@ class BertAttention(nn.Module):
             encoder_attention_mask,
             past_key_value,
             output_attentions,
+            gram_attention=gram_attention,
         )
         attention_output = self.output(self_outputs[0], hidden_states)
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
@@ -375,17 +602,17 @@ class BertOutput(nn.Module):
 
 
 class BertLayer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_num=0):
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
-        self.attention = BertAttention(config)
+        self.attention = BertAttention(config, layer_num=layer_num)
         self.is_decoder = config.is_decoder
         self.add_cross_attention = config.add_cross_attention
         if self.add_cross_attention:
             if not self.is_decoder:
                 raise ValueError(f"{self} should be used as a decoder model if cross attention is added")
-            self.crossattention = BertAttention(config, position_embedding_type="absolute")
+            self.crossattention = BertAttention(config, position_embedding_type="absolute", layer_num=layer_num)
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
@@ -398,6 +625,7 @@ class BertLayer(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
+        gram_attention: Optional[bool] = False,
     ) -> Tuple[torch.Tensor]:
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
@@ -435,6 +663,7 @@ class BertLayer(nn.Module):
                 encoder_attention_mask,
                 cross_attn_past_key_value,
                 output_attentions,
+                gram_attention=gram_attention,
             )
             attention_output = cross_attention_outputs[0]
             outputs = outputs + cross_attention_outputs[1:-1]  # add cross attentions if we output attention weights
@@ -464,7 +693,7 @@ class BertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList([BertLayer(config, layer_num=i) for i in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     def forward(
@@ -479,6 +708,7 @@ class BertEncoder(nn.Module):
         output_attentions: Optional[bool] = False,
         output_hidden_states: Optional[bool] = False,
         return_dict: Optional[bool] = True,
+        gram_attention: Optional[bool] = False,
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -512,6 +742,7 @@ class BertEncoder(nn.Module):
                     layer_head_mask,
                     encoder_hidden_states,
                     encoder_attention_mask,
+                    gram_attention=gram_attention,
                 )
             else:
                 layer_outputs = layer_module(
@@ -522,6 +753,7 @@ class BertEncoder(nn.Module):
                     encoder_attention_mask,
                     past_key_value,
                     output_attentions,
+                    gram_attention=gram_attention,
                 )
 
             hidden_states = layer_outputs[0]
@@ -797,6 +1029,7 @@ class BertModel(BertPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        gram_attention: Optional[bool] = False,
     ):
         r"""
         encoder_hidden_states  (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
@@ -865,7 +1098,10 @@ class BertModel(BertPreTrainedModel):
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
         if self.config.is_decoder and encoder_hidden_states is not None:
-            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
+            if gram_attention:
+                encoder_batch_size, _, encoder_sequence_length, _ = encoder_hidden_states.size()
+            else:
+                encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
             if encoder_attention_mask is None:
                 encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
@@ -899,6 +1135,7 @@ class BertModel(BertPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            gram_attention=gram_attention,
         )
         sequence_output = encoder_outputs[0]
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None

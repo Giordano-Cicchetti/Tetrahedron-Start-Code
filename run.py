@@ -11,6 +11,9 @@ from utils.pipeline import train, test
 import os
 import wandb
 
+os.environ["TORCH_USE_CUDA_DSA"] = "1"
+
+
 def main():
 
     ### init 

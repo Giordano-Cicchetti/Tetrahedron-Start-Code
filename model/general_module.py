@@ -481,11 +481,16 @@ class MMGeneralModule(nn.Module):
             
         vision_output = self.hidden_trans_vision_multimodal(vision_output)  
 
+        
+
         if self.config.frame_embedding_type == 'adaptive':
+            #print("Using adaptive frame embedding for vision")
             if n!=self.vision_frame_embedding.shape[1]: #### testing and interpolate
                 # dtype = self.vision_frame_embedding.dtype
+                #print("Interpolating frame embedding from {} to {}".format(self.vision_frame_embedding.shape[1],n))
                 vision_frame_embedding = F.interpolate(self.vision_frame_embedding.float().permute(0,2,1),n,mode='nearest').permute(0,2,1).to(self.vision_frame_embedding)
             else:
+                #print("Using original frame embedding with length {}".format(self.vision_frame_embedding.shape[1]))
                 vision_frame_embedding = self.vision_frame_embedding
 
 
@@ -501,6 +506,45 @@ class MMGeneralModule(nn.Module):
 
         if hasattr(self,'vision_type_embeddings'): ### for three modality
             vision_output =  vision_output + self.vision_type_embeddings
+
+        # vision_output = vision_output[:,:450]
+        return vision_output
+    
+
+    def get_multimodal_forward_input_vision_not_reshaped(self, vision_output):
+
+        b,n,x,c = vision_output.shape
+        # if self.config.pool_video:
+        #     vision_output = vision_output[:,:,0]
+            
+        vision_output = self.hidden_trans_vision_multimodal(vision_output)  
+
+        
+
+        if self.config.frame_embedding_type == 'adaptive':
+            print("Using adaptive frame embedding for vision")
+            if n!=self.vision_frame_embedding.shape[1]: #### testing and interpolate
+                # dtype = self.vision_frame_embedding.dtype
+                print("Interpolating frame embedding from {} to {}".format(self.vision_frame_embedding.shape[1],n))
+                vision_frame_embedding = F.interpolate(self.vision_frame_embedding.float().permute(0,2,1),n,mode='nearest').permute(0,2,1).to(self.vision_frame_embedding)
+            else:
+                print("Using original frame embedding with length {}".format(self.vision_frame_embedding.shape[1]))
+                vision_frame_embedding = self.vision_frame_embedding
+
+
+            vision_output =  vision_output + vision_frame_embedding.unsqueeze(-2)
+
+
+
+        elif self.config.frame_embedding_type == 'none':
+            pass
+
+
+        #vision_output =  vision_output.reshape(b,-1,self.multimodal_dim) 
+
+        #if hasattr(self,'vision_type_embeddings'): ### for three modality
+        #    print("Adding vision type embedding")
+        #    vision_output =  vision_output + self.vision_type_embeddings
 
         # vision_output = vision_output[:,:450]
         return vision_output

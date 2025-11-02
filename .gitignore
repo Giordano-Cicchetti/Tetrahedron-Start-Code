@@ -121,3 +121,5 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+/datasets/srcdata/*
+/GRAM_pretrained_4modalities/*

@@ -194,6 +194,11 @@ class GRAM(MMGeneralModule):
             vision_output = self.batch_get(batch, 'vision_output')
             condition_feats_v = self.get_multimodal_forward_input_vision(vision_output)
             batch[key] = condition_feats_v
+
+        elif key == 'condition_feats_v_not_reshaped':
+            vision_output = self.batch_get(batch, 'vision_output')
+            condition_feats_v = self.get_multimodal_forward_input_vision_not_reshaped(vision_output)
+            batch[key] = condition_feats_v
             
         elif key == 'condition_feats_d':
             vision_output = self.batch_get(batch, 'depth_output')
@@ -242,6 +247,13 @@ class GRAM(MMGeneralModule):
         elif key == 'feat_v':
             vision_output = self.batch_get(batch, 'vision_output')
             vision_output_pooled = self.pool_vision_for_contra(vision_output)
+            feat_v = self.contra_head_v(vision_output_pooled)
+            feat_v = F.normalize(feat_v,dim=-1)
+            batch[key] = feat_v
+
+        elif key == 'feat_v_all':
+            vision_output = self.batch_get(batch, 'vision_output')
+            vision_output_pooled = vision_output[:,:,0]
             feat_v = self.contra_head_v(vision_output_pooled)
             feat_v = F.normalize(feat_v,dim=-1)
             batch[key] = feat_v
@@ -399,11 +411,13 @@ class GRAM(MMGeneralModule):
         output_dict = {k:v for dic in output_ls for k,v in dic.items()  }
         return output_dict
 
-    def compute_slice_scores(self, slice_multimodal_vision_input, slice_input_ids, slice_attention_mask):
+    def compute_slice_scores(self, slice_multimodal_vision_input, slice_input_ids, slice_attention_mask, gram_attention=False):
             
+        #print("Slice multimodal vision input shape:", slice_multimodal_vision_input.shape)
         slice_output = self.multimodal_encoder.bert(input_ids = slice_input_ids,
                                                     attention_mask = slice_attention_mask,
-                                                    encoder_hidden_states=slice_multimodal_vision_input).last_hidden_state
+                                                    encoder_hidden_states=slice_multimodal_vision_input, output_attentions=False, gram_attention=gram_attention).last_hidden_state
+        #print("Slice output shape:", slice_output.shape)
         slice_scores = F.softmax(self.itm_head(slice_output[:,0]),dim=1)[:,1]
 
         return slice_scores
@@ -486,8 +500,28 @@ class GRAM(MMGeneralModule):
             #vid_sim = feat_t @ feat_v_all.T
             #vid_simT = feat_v @ feat_t_all.T
                      
-            condition_feats = self.batch_get(batch, f'condition_feats_va')#self.batch_get(batch, f'condition_feats_v')
+            #condition_feats = self.batch_get(batch, f'condition_feats_va')#self.batch_get(batch, f'condition_feats_v')
+            #condition_feats_collate = all_gather_with_grad(condition_feats)
+
+            condition_feats_v = self.batch_get(batch, f'condition_feats_v')
+            condition_feats_a = self.batch_get(batch, f'condition_feats_a')
+
+            condition_feats_a_interpolated = torch.nn.functional.interpolate(condition_feats_a.permute(0,2,1), size=condition_feats_v.shape[1], mode='linear', align_corners=False).permute(0,2,1)
+            #print(condition_feats_a_interpolated.shape)
+
+            condition_feats_a_interpolated = torch.nn.functional.interpolate(
+                condition_feats_a.permute(0, 2, 1).unsqueeze(-1),  # [1, 768, 256, 1]
+                size=(condition_feats_v.shape[1], 1),                      # target size for (H, W)
+                mode='bilinear',                    # or 'nearest', 'linear'
+                align_corners=False
+            ).squeeze(-1).permute(0, 2, 1)
+            #print(condition_feats_a_interpolated.shape)
+
+            condition_feats = torch.cat([condition_feats_v.unsqueeze(1), condition_feats_a_interpolated.unsqueeze(1)], dim=1)
+            #print(condition_for_multimodal_self_attention.shape)
             condition_feats_collate = all_gather_with_grad(condition_feats)
+
+
             with torch.no_grad():
                 weights_t2cond = F.softmax(-(volume), dim=1) + 1e-4
                 weights_t2cond[:, rank * bs : rank * bs + bs].fill_diagonal_(0)
@@ -516,7 +550,7 @@ class GRAM(MMGeneralModule):
             condition_feats = torch.cat((condition_feats,condition_feats_neg,condition_feats),dim=0)
             output = self.multimodal_encoder.bert(input_ids = input_ids_1,
                                         attention_mask = attention_mask_1,
-                                        encoder_hidden_states=condition_feats).last_hidden_state
+                                        encoder_hidden_states=condition_feats, gram_attention=True).last_hidden_state
             batch_size = condition_feats_neg.shape[0]
             logits = self.itm_head(output[:,0].half())
             ground_truth = torch.zeros(batch_size*3).long().cuda()
@@ -604,6 +638,9 @@ class GRAM(MMGeneralModule):
             evaluation_dict['feat_v'] = feat_v 
             feat_a = self.batch_get(batch,'feat_a')
             evaluation_dict['feat_a'] = feat_a
+
+            feat_v_all = self.batch_get(batch,'feat_v_all')
+            evaluation_dict['feat_v_all'] = feat_v_all
             
             if "raw_subtitles" in batch.keys(): 
                 feat_s = self.batch_get(batch,'feat_s')
@@ -624,6 +661,8 @@ class GRAM(MMGeneralModule):
 
                 condition_feats = self.batch_get(batch, f'condition_feats_{task[1:]}')
                 evaluation_dict[f'condition_feats_{task}'] = condition_feats
+
+            evaluation_dict['condition_feats_v_not_reshaped'] = self.batch_get(batch, 'condition_feats_v_not_reshaped')
 
             return evaluation_dict
 

@@ -14,7 +14,7 @@ from utils.logger import LOGGER
 from utils.distributed import  all_gather_list, ddp_allgather
 from utils.tool import NoOp
 from easydict import EasyDict as edict
-from utils.volume import volume_computation4,volume_computation3, volume_computation5, volume_computation_takashi_gpu
+from utils.volume import volume_computation4,volume_computation3, volume_computation5
 import wandb
 
 
@@ -184,12 +184,19 @@ def evaluate_ret(model, tasks, val_loader, global_step):
     feat_v = []
     feat_s = []
     feat_d = []
+    feat_v_all = []
 
     for task in subtasks:
         # store_dict[f'feat_cond_{task}'] = []
-        store_dict[f'condition_feats_{task}'] = []        
+        store_dict[f'condition_feats_{task}'] = []    
+
+    store_dict["condition_feats_v_not_reshaped"] = []
+    num_batch = 0    
 
     for i, batch in tqdm(enumerate(val_loader), total=len(val_loader)):
+        num_batch += 1
+        if num_batch == 5 :
+            break
         batch = edict(batch)
         evaluation_dict= model(batch, tasks, compute_loss=False)
         # evaluation_dict = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in evaluation_dict.items()}
@@ -201,6 +208,11 @@ def evaluate_ret(model, tasks, val_loader, global_step):
             feat_s.append(evaluation_dict['feat_s'])
         if 'feat_d' in evaluation_dict.keys():
             feat_d.append(evaluation_dict['feat_d'])
+
+        feat_v_all.append(evaluation_dict['feat_v_all'])
+
+
+        
       
         input_ids.append(evaluation_dict['input_ids'])
         attention_mask.append(evaluation_dict['attention_mask'])
@@ -218,6 +230,8 @@ def evaluate_ret(model, tasks, val_loader, global_step):
         for task in subtasks:
             # store_dict[f'feat_cond_{task}'].append(evaluation_dict[f'feat_cond_{task}'])    
             store_dict[f'condition_feats_{task}'].append(evaluation_dict[f'condition_feats_{task}'])
+
+        store_dict["condition_feats_v_not_reshaped"].append(evaluation_dict["condition_feats_v_not_reshaped"])
 
         
             
@@ -237,6 +251,11 @@ def evaluate_ret(model, tasks, val_loader, global_step):
     feat_v = torch.cat(feat_v, dim = 0)
     feat_v = ddp_allgather(feat_v)
 
+    feat_v_all = torch.cat(feat_v_all, dim=0)
+    feat_v_all = ddp_allgather(feat_v_all)
+
+    print("feat_v_all shape:", feat_v_all.shape)
+
     if len(feat_s)>0:
         feat_s = torch.cat(feat_s, dim = 0)
         feat_s = ddp_allgather(feat_s)
@@ -251,34 +270,77 @@ def evaluate_ret(model, tasks, val_loader, global_step):
     #if len(feat_s)>0:
     #    if len(feat_d)>0:
     #        area = volume_computation5(feat_t,feat_v,feat_a,feat_s,feat_d)
-    #        print("Using 5-modality volume computation")
     #    else:
-    #        print("Using 4-modality volume computation")
     #        area = volume_computation4(feat_t,feat_v,feat_a,feat_s) #(feat_t,feat_v,feat_a)
     #else:
-    #    print("Using 3-modality volume computation")
     #    area = volume_computation3(feat_t,feat_v,feat_a)
-
-    area = volume_computation3(feat_t,feat_v,feat_a)#,feat_s) #(feat_t,feat_v,feat_a)
-    print("Area shape:", area.shape)
+    #bottom_k = 8 
+    #volume = []
+    #selected_frame_num = []
+    #for i in range(feat_t.shape[0]):
+    #    #print("feat_v_all sample shape:", feat_v_all[i].shape)
+    #    volume_i = []
+    #    selected_frame_num_i = []
+    #    for j in range(feat_v_all.shape[0]):
+#
+    #        volume_single_frames = []
+    #        for frame_feat in feat_v_all[j]:
+    #            volume_frame = volume_computation4(feat_t[i].unsqueeze(0), frame_feat.unsqueeze(0), feat_a[j].unsqueeze(0), feat_s[j].unsqueeze(0))  #(feat_t,feat_v,feat_a)
+    #            volume_single_frames.append(volume_frame)
+#
+    #        #min_volume = min(volume_single_frames)
+    #        volume_tensor = torch.stack(volume_single_frames).squeeze(-1).squeeze(-1)
+    #        #print(volume_tensor)
+    #        #print(volume_tensor.shape)
+    #        bottom_values, bottom_indices = torch.topk(volume_tensor, bottom_k, largest=False)
+    #        #min_index = volume_single_frames.index(bottom_k)
+#
+    #        selected_frame_num_i.append(bottom_indices.tolist())
+    #        #rint(bottom_values)
+    #        #rint(bottom_values[0])
+    #        volume_i.append(bottom_values[0].unsqueeze(0))
+    #        #print(f"Processed volume for sample {i}-{j}: {volume_single_frames}")
+#
+    #    #prit(volume_i)
+    #    volume.append(volume_i)
+    #    selected_frame_num.append(selected_frame_num_i)
         
-    min_values_volume = torch.min(area, 1).values
+    #print(volume[0])
+    #area = torch.cat([torch.cat(volume[i],dim=0).unsqueeze(0) for i in range(len(volume))],dim=0).squeeze(-1)
+    #selected_frame_num = torch.tensor(selected_frame_num)
+    volume_i = []
+    for i in range(feat_v_all.shape[1]):
+        volume = volume_computation4(feat_t, feat_v_all[:,i,:].squeeze(1), feat_a, feat_s)
+        volume_i.append(volume)
+
+    volume_cat = torch.stack(volume_i, dim=-1)
+    
+    volume, _ = torch.min(volume_cat, dim=2)
+
+
+    bottom_k = 1
+    _ , selected_frame_num = torch.topk(volume_cat, bottom_k, dim=2, largest=False)
+    #selected_frame_num = selected_frame_num.squeeze(-1)
+
+
+
+    print("Selected frame indices for minimum volume:", selected_frame_num)
+    print("Selected frame shape:", selected_frame_num.shape)
+    print("volume shape:", volume.shape)
+    min_values_volume = torch.min(volume, 1).values
     mean_values_volume = torch.mean(min_values_volume)
     val_log[f"gramian_value"] = {"value": mean_values_volume.item()}
     
     
-    log = compute_metric_ret_area(area, ids, ids_txt, direction='forward')
+    log = compute_metric_ret_area(volume, ids, ids_txt, direction='forward')
     log = {k.replace('forward','volume_T2D'): v for k,v in log.items()}
 
     val_log[f'ret_area_forward'] = log
 
-    log = compute_metric_ret_area(area.T, ids, ids_txt, direction='forward')
+    log = compute_metric_ret_area(volume.T, ids, ids_txt, direction='forward')
     log = {k.replace('backward','volume_D2T'): v for k,v in log.items()}
 
     val_log[f'ret_area_backard'] = log
-
-    print("Evaluation Results at step {}: {}".format(global_step, val_log))
-    
 
     # video_similarity = feat_t @ feat_v.T
 
@@ -286,34 +348,23 @@ def evaluate_ret(model, tasks, val_loader, global_step):
     # log = {k.replace('backward','area_video'): v for k,v in log.items()}
     # val_log[f'ret_area_back_with_video'] = log
 
-    condition_feats_v = torch.cat(store_dict['condition_feats_tv'],dim=0)
-    condition_feats_a = torch.cat(store_dict['condition_feats_ta'],dim=0)
+    print("Conditional Features shape:{}".format(len(store_dict[f'condition_feats_{task}'])))
+    print("Each Conditional Feature sample shape:{}".format(store_dict[f'condition_feats_{task}'][0].shape))
 
-    condition_feats_a_interpolated = torch.nn.functional.interpolate(condition_feats_a.permute(0,2,1), size=condition_feats_v.shape[1], mode='linear', align_corners=False).permute(0,2,1)
-    print(condition_feats_a_interpolated.shape)
 
-    condition_feats_a_interpolated = torch.nn.functional.interpolate(
-        condition_feats_a.permute(0, 2, 1).unsqueeze(-1),  # [1, 768, 256, 1]
-        size=(condition_feats_v.shape[1], 1),                      # target size for (H, W)
-        mode='bilinear',                    # or 'nearest', 'linear'
-        align_corners=False
-    ).squeeze(-1).permute(0, 2, 1)
-    print(condition_feats_a_interpolated.shape)
+    print("conditional features length:", len(store_dict[f'condition_feats_v_not_reshaped']))
+    print("Each conditional features sample shape:", store_dict[f'condition_feats_v_not_reshaped'][0].shape)
 
-    condition_for_multimodal_self_attention = torch.cat([condition_feats_v.unsqueeze(1), condition_feats_a_interpolated.unsqueeze(1)], dim=1)
-    print(condition_for_multimodal_self_attention.shape)
-
-    #store_dict[f'condition_feats_va'] = torch.cat(store_dict[f'condition_feats_va'],dim=0)
+    store_dict[f'condition_feats_{task}'] = torch.cat(store_dict[f'condition_feats_{task}'],dim=0)
+    store_dict[f'condition_feats_v_not_reshaped'] = torch.cat(store_dict[f'condition_feats_v_not_reshaped'],dim=0)
     itm_rerank_num = model.config.itm_rerank_num
     #itm_rerank_num = 30
-    #score_matrix = refine_score_matrix(store_dict[f'condition_feats_va'], input_ids, attention_mask, -area , model, itm_rerank_num, direction='forward')#-(area-video_similarity)
-    score_matrix = refine_score_matrix(condition_for_multimodal_self_attention, input_ids, attention_mask, -area , model, itm_rerank_num, direction='forward', gram_attention=True)#-(area-video_similarity)
+    score_matrix = refine_score_matrix(store_dict['condition_feats_v_not_reshaped'], input_ids, attention_mask, -volume , model, itm_rerank_num, direction='forward', selected_frame_num=selected_frame_num)#-(area-video_similarity)
     log = compute_metric_ret(score_matrix, ids, ids_txt, direction='forward')
     log = {k.replace('forward','volume_ITM_T2D'): v for k,v in log.items()}
 
-    
-    #score_matrix = refine_score_matrix(store_dict[f'condition_feats_va'], input_ids, attention_mask, -area, model, itm_rerank_num, direction='backward') #-(area-video_similarity)
-    score_matrix = refine_score_matrix(condition_for_multimodal_self_attention, input_ids, attention_mask, -area, model, itm_rerank_num, direction='backward', gram_attention=True) #-(area-video_similarity)
+
+    score_matrix = refine_score_matrix(store_dict['condition_feats_v_not_reshaped'], input_ids, attention_mask, -volume, model, itm_rerank_num, direction='backward', selected_frame_num=selected_frame_num) #-(area-video_similarity)
     log2 = compute_metric_ret(score_matrix, ids, ids_txt, direction='backward')
     log2 = {k.replace('backward','volume_ITM_D2T'): v for k,v in log2.items()}
     log.update(log2)
@@ -336,10 +387,8 @@ def evaluate_ret(model, tasks, val_loader, global_step):
     cosine_AT = torch.matmul(feat_a, feat_t.permute(1,0))
     cosine_AT = compute_metric_ret(cosine_AT, ids, ids_txt, direction='forward')
     val_log[f'cosine_AT'] = cosine_AT
-
-    print("Evaluation Results at step {}: {}".format(global_step, val_log))
     
-    ### compute itc_score
+    ## compute itc_score
     #for task in subtasks:
     #    if  task == "tvas" or task == "tva":
     #        continue
@@ -358,9 +407,9 @@ def evaluate_ret(model, tasks, val_loader, global_step):
     #        log.update(log2)
 #
     #    val_log[f'ret_itc_{task}'] = log
-#
-#
-    ##### compute itm_score
+
+
+    #### compute itm_score
     #for task in subtasks:
     #    if  task == "tvas" or task == "tva":
     #        continue
@@ -384,7 +433,9 @@ def evaluate_ret(model, tasks, val_loader, global_step):
         
     return val_log
 
-def refine_score_matrix(condition_feats, input_ids, attention_mask, score_matrix_t_cond, model, itm_rerank_num, direction='forward', gram_attention=False):
+def refine_score_matrix(condition_feats, input_ids, attention_mask, score_matrix_t_cond, model, itm_rerank_num, direction='forward',    selected_frame_num=None):
+    """ Refine the initial retrieval score with cross-modal re-ranking
+    """
 
     top_k = itm_rerank_num
     if direction=='forward':
@@ -397,6 +448,9 @@ def refine_score_matrix(condition_feats, input_ids, attention_mask, score_matrix
     
     score_matrix_t_cond_new = torch.zeros_like(score_matrix_t_cond)
     idxs_new = torch.zeros_like(score_matrix_t_cond_new).long()
+
+
+
     if direction=='forward':
         for i in range(len(idxs)):
             for j in idxs[i]:
@@ -405,6 +459,8 @@ def refine_score_matrix(condition_feats, input_ids, attention_mask, score_matrix
         for i in range(idxs.shape[1]):
             for j in idxs[:,i]:
                 idxs_new[j][i] = 1
+
+    #print(idxs_new)
     cur_length = condition_feats.shape[0]
     length_ls = all_gather_list(cur_length)
     start = 0
@@ -429,24 +485,51 @@ def refine_score_matrix(condition_feats, input_ids, attention_mask, score_matrix
         cur_scores = []
         cur_input_ids = input_ids[(cur_idxs_new[:,i] == 1)]
         cur_attention_mask = attention_mask[(cur_idxs_new[:,i] == 1)]
-        if gram_attention:
-            cur_condition_feats = condition_feats[i].unsqueeze(0).expand(cur_input_ids.shape[0], -1, -1, -1)
-        else:
-            cur_condition_feats = condition_feats[i].unsqueeze(0).expand(cur_input_ids.shape[0], -1, -1)
+        
+        #print("cur_input_ids shape:", cur_input_ids.shape)
+        #print("Current input ids:", cur_input_ids)
+        #print("idx shape", idxs.shape)
+        #print(f"idxs {idxs}")
+        #print("(cur_idxs_new[:,i] == 1) = {}:".format(cur_idxs_new[:,i] == 1))
 
         #cur_condition_feats = condition_feats[i].unsqueeze(0).expand(cur_input_ids.shape[0],-1,-1)
+        
+        cur_condition_feats = []
+        for j in range(cur_input_ids.shape[0]):
+            if direction=='forward':
+                selected_frames_cond = condition_feats[i][selected_frame_num[j][i]]
+            else:
+                selected_frames_cond = condition_feats[i][selected_frame_num[i][j]]
+            selected_frames_cond = selected_frames_cond.view(-1, selected_frames_cond.size(-1)).unsqueeze(0)
+            #print(selected_frames_cond.shape)
+            #cur_condition_feats.append(condition_feats[i][selected_frame_num[i][j]].unsqueeze(0))
+            cur_condition_feats.append(selected_frames_cond)
+        cur_condition_feats = torch.cat(cur_condition_feats,dim=0)
+        
+        #print("cur_condition_feats shape:", cur_condition_feats.shape)
+        #print("Current attention mask:", cur_attention_mask.shape)
+        #print("Current input ids shape:", cur_input_ids.shape)
         total_len = len(cur_condition_feats)
-        small_batch=10
+        #print("total_len:", total_len)
+        small_batch=25
         times = total_len//small_batch if total_len%small_batch==0 else total_len//small_batch+1
 
         for k in range(times):
+            #print(k)
             slice_input_ids = cur_input_ids[k*small_batch:(k+1)*small_batch]
             slice_attention_mask = cur_attention_mask[k*small_batch:(k+1)*small_batch]
             slice_condition_feats = cur_condition_feats[k*small_batch:(k+1)*small_batch]
-            slice_scores = model.compute_slice_scores(slice_condition_feats, slice_input_ids, slice_attention_mask, gram_attention=gram_attention) 
+            #print("slice_condition_feats shape:", slice_condition_feats.shape)
+            #print("slice_input_ids shape:", slice_input_ids.shape)
+            #print("slice_attention_mask shape:", slice_attention_mask.shape)
+            slice_scores = model.compute_slice_scores(slice_condition_feats, slice_input_ids, slice_attention_mask) 
+            #print("slice_scores shape:", slice_scores.shape)
             cur_scores.append(slice_scores)
+
+        #print("Number of score slices:", len(cur_scores))
         cur_scores = torch.cat(cur_scores,dim=0)
 
+        #print("cur_scores shape:", cur_scores.shape)
         cur_score_matrix_t_cond_new[:,i][(cur_idxs_new[:,i] == 1)] = cur_scores
         pbar.update(1)
     pbar.close()
