@@ -43,20 +43,51 @@ def train(model, optimizer, train_loader, val_loaders, args, start_step=0, verbo
 
         if run_cfg.fp16:
             with autocast():
-                loss_dict = model(batch, task=task, compute_loss=True)
+                loss_dict = model(batch, task=task, compute_loss=True, run_cfg=run_cfg)
+                loss_dict_tobe_logged = {k:v.item() for k,v in loss_dict.items()}
+                if dist.get_rank() == 0:
+                    wandb.log(loss_dict_tobe_logged)
+
+                del loss_dict['temperature']
+                if 'temperature_1' in loss_dict:
+                    del loss_dict['temperature_1']
+                if 'temperature_2' in loss_dict:
+                    del loss_dict['temperature_2']
+                del loss_dict['smean-volume-train']
+                del loss_dict['smin-volume-train']
+                del loss_dict['s1-train']
+                del loss_dict['s2-train']
+                if 's3-train' in loss_dict:
+                    del loss_dict['s3-train']
+                
+
                 loss = sum(list(loss_dict.values()))
                 loss_dict['total_loss'] = loss
-                loss_dict = {k:v.item() for k,v in loss_dict.items()}
-                if dist.get_rank() == 0:
-                    wandb.log(loss_dict)
+                #loss_dict = {k:v.item() for k,v in loss_dict.items()}
+                
                 
         else:
-            loss_dict = model(batch, task=task, compute_loss=True)
+            loss_dict = model(batch, task=task, compute_loss=True, run_cfg=run_cfg)
+            loss_dict_tobe_logged = {k:v.item() for k,v in loss_dict.items()}
+            if dist.get_rank() == 0:
+                wandb.log(loss_dict_tobe_logged)
+
+            del loss_dict['temperature']
+            if 'temperature_1' in loss_dict:
+                del loss_dict['temperature_1']
+            if 'temperature_2' in loss_dict:
+                del loss_dict['temperature_2']
+            del loss_dict['smean-volume-train']
+            del loss_dict['smin-volume-train']
+            del loss_dict['s1-train']
+            del loss_dict['s2-train']
+            if 's3-train' in loss_dict:
+                del loss_dict['s3-train']
+
             loss = sum(list(loss_dict.values()))
             loss_dict['total_loss'] = loss
-            loss_dict = {k:v.item() for k,v in loss_dict.items()}
-            if dist.get_rank() == 0:
-                wandb.log(loss_dict)
+            #loss_dict = {k:v.item() for k,v in loss_dict.items()}
+            
             
 
 
@@ -124,6 +155,14 @@ def train(model, optimizer, train_loader, val_loaders, args, start_step=0, verbo
             if dist.get_rank() == 0:
                 for task_name, val_log in eval_log.items():
                     for eval_name, metric in val_log.items():
+                        # skip if metric is float 
+                        if isinstance(metric, float):   
+                            continue
+                        skipping_metrics = ['distance_true_pairs_tv', 'distance_true_pairs_ta', 'distance_true_pairs_va', 'mean_cosine_a', 'mean_cosine_v', 'mean_cosine_t,'
+                        'rmg_tv', 'rmg_ta', 'rmg_va', 'gap_va', 'gap_ta', 'gap_tv', 's1-test', 's2-test', 's3-test', 'gramian_value_true_samples', 'mean_gramian_value']
+                        if eval_name in skipping_metrics:
+                            continue
+
                         eval_name = task_name +'_' +eval_name 
                         metric_logger_dict[eval_name][str(global_step)] = metric
                         LOGGER.info(f"====-evaluation--{eval_name}=====step {global_step}--===========\n")

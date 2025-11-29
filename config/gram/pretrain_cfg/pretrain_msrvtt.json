@@ -22,7 +22,7 @@
             "vision_format": "video_rawvideo",
             "vision_sample_num": 8,
             "audio_sample_num": 1,
-            "task" : "ret%tv%ta",
+            "task" : "ret%tv%ta%tva",
             "epoch": 4,
             "n_workers":8,
             "batch_size": 64 
@@ -39,7 +39,7 @@
             "audio": "/leonardo_scratch/fast/IscrC_NeuroGen/dataset/MSRVTT/audios_test",
             "vision_sample_num": 8, 
             "audio_sample_num": 1,   
-            "task" : "ret%tv%ta%tvas",
+            "task" : "ret%tv%ta%tva",
             "n_workers": 8,
             "batch_size": 64 
         }]}}

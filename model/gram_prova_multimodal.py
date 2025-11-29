@@ -13,7 +13,7 @@ from utils.distributed import all_gather_with_grad, concat_all_gather, all_gathe
 from torch.nn import LayerNorm as LayerNorm
 from easydict import EasyDict as edict
 from utils.volume import volume_computation4,volume_computation3, volume_computation5, volume_computation_takashi_3_optimized,simple_gram_matrix_computation, simple_tethraedron_matrix_computation
-from utils.volume import align_loss, uniform_loss, area_computation, volume_computation, multimodal_volume
+from utils.volume import align_loss, uniform_loss, area_computation
 
 class GRAM(MMGeneralModule):
     """ VLP pretraining """
@@ -34,9 +34,8 @@ class GRAM(MMGeneralModule):
         self.contra_head_va = nn.Linear(self.vision_dim + self.audio_dim, contra_dim)
         self.contra_head_vs = nn.Linear(self.vision_dim + self.multimodal_dim, contra_dim)
         self.contra_head_vas = nn.Linear(self.vision_dim + self.audio_dim + self.multimodal_dim, contra_dim)
-        self.contra_temp = nn.Parameter(torch.tensor(0.07))
-        #self.contra_temp_1 = nn.Parameter(torch.tensor(0.07))
-        #self.contra_temp_2 = nn.Parameter(torch.tensor(0.07))
+        self.contra_temp_1 = nn.Parameter(torch.tensor(0.07))
+        self.contra_temp_2 = nn.Parameter(torch.tensor(0.07))
         self.itm_head = Match_head(self.multimodal_dim)
         self.vision_frame_embedding = nn.Parameter(0.02 * torch.randn(1, self.config.max_vision_sample_num, self.multimodal_dim))
         self.audio_frame_embedding = nn.Parameter(0.02 * torch.randn(1, self.config.max_audio_sample_num, self.multimodal_dim))
@@ -253,13 +252,6 @@ class GRAM(MMGeneralModule):
             feat_v = F.normalize(feat_v,dim=-1)
             batch[key] = feat_v
 
-        elif key == 'feat_v_all_frames':
-            vision_output = self.batch_get(batch, 'vision_output')
-            vision_output_pooled = self.pool_vision_for_contra_no_mean(vision_output)
-            feat_v = self.contra_head_v(vision_output_pooled)
-            feat_v = F.normalize(feat_v,dim=-1)
-            batch[key] = feat_v
-
         elif key == 'feat_v_all':
             vision_output = self.batch_get(batch, 'vision_output')
             vision_output_pooled = vision_output[:,:,0]
@@ -365,7 +357,7 @@ class GRAM(MMGeneralModule):
         return batch[key] 
 
 
-    def forward(self, batch, task, compute_loss=True, run_cfg=None):
+    def forward(self, batch, task, compute_loss=True):
         batch = edict(batch)
         ### gram-27m pretraining
         #if 'vision_captions' in batch or 'audio_captions' in batch or 'omni_captions' in batch:
@@ -379,15 +371,15 @@ class GRAM(MMGeneralModule):
 
         for task in task_ls:
             if task.startswith('ret'):
-                ret_dict = self.forward_ret(batch, task, compute_loss=compute_loss, run_cfg=run_cfg)
+                ret_dict = self.forward_ret(batch, task, compute_loss=compute_loss)
                 output_ls.append(ret_dict)
 
             elif task.startswith('cap'):
-                cap_dict = self.forward_cap(batch, task, compute_loss=compute_loss, run_cfg=run_cfg)
+                cap_dict = self.forward_cap(batch, task, compute_loss=compute_loss)
                 output_ls.append(cap_dict)
 
             elif task.startswith('qa'):
-                qa_dict = self.forward_qa(batch, task, compute_loss=compute_loss, run_cfg=run_cfg)
+                qa_dict = self.forward_qa(batch, task, compute_loss=compute_loss)
                 output_ls.append(qa_dict)
             
             else:
@@ -432,7 +424,7 @@ class GRAM(MMGeneralModule):
         return slice_scores
 
 
-    def forward_ret(self, batch, task, compute_loss=True, run_cfg=None):
+    def forward_ret(self, batch, task, compute_loss=True):
         
         if isinstance(batch.raw_captions[0],list): #### test
             batch.raw_captions = [i for j in batch.raw_captions for i in j]
@@ -452,21 +444,14 @@ class GRAM(MMGeneralModule):
             feat_a = self.batch_get(batch,'feat_a')
             feat_a_all = concat_all_gather(feat_a)
             #Extract subtitles features
-            if "raw_subtitles" in batch.keys():
-                feat_s = self.batch_get(batch,'feat_s')
-                feat_s_all = concat_all_gather(feat_s)
+            #if "raw_subtitles" in batch.keys():
+            #    feat_s = self.batch_get(batch,'feat_s')
+            #    feat_s_all = concat_all_gather(feat_s)
             ##extract depth features
-            if "depth_pixels" in batch.keys():
-                feat_d = self.batch_get(batch,'feat_d')
-                feat_d_all = concat_all_gather(feat_d)
+            #if "depth_pixels" in batch.keys():
+            #    feat_d = self.batch_get(batch,'feat_d')
+            #    feat_d_all = concat_all_gather(feat_d)
             #TODO extract other k features
-
-            #feat_v_all_frames = self.batch_get(batch,'feat_v_all_frames') # Bs x num_frames x dim
-
-            
-            #volume_intra_vision = multimodal_volume(feat_v_all_frames)
-            #volume_intra_vision = volume_intra_vision.mean() 
-            #loss_dict['mean-intra-vision-volume-train'] = volume_intra_vision
             
             caption_tokens = self.batch_get(batch, 'caption_tokens')
             input_ids, attention_mask = caption_tokens.input_ids, caption_tokens.attention_mask
@@ -483,91 +468,27 @@ class GRAM(MMGeneralModule):
             sim_ta = feat_t @ feat_a_all.T
             sim_at = feat_a @ feat_t_all.T
 
+            volume = volume_computation_takashi_3_optimized(feat_t,feat_v_all,feat_a_all)
+            #volume = volume_computation3(feat_t,feat_v_all,feat_a_all)
+            #volume = area_computation(feat_t,feat_v_all,feat_a_all)
 
-            # LET US COMPUTE THE Text-to-Data VOLUME
-            if run_cfg.train.ret_loss == "tetrahedron":
-                if run_cfg.train.modalities_ret == "TVA":
-                    volume_orig = volume_computation_takashi_3_optimized(feat_t,feat_v_all,feat_a_all)
-                elif run_cfg.train.modalities_ret == "TVAS":
-                    #TODO implement volume computation with subtitles
-                    assert False, "Not implemented yet tetrahedron volume with subtitles"
-                elif run_cfg.train.modalities_ret == "TVASD":
-                    #TODO implement volume computation with subtitles and depth
-                    assert False, "Not implemented yet tetrahedron volume with subtitles and depth"
-            
-            elif run_cfg.train.ret_loss == "gram":
-                if run_cfg.train.modalities_ret == "TV":
-                    volume_orig = volume_computation(feat_t,feat_v_all)
-                if run_cfg.train.modalities_ret == "TVA":
-                    volume_orig = volume_computation(feat_t,feat_v_all,feat_a_all)
-                elif run_cfg.train.modalities_ret == "TVAS":
-                    volume_orig = volume_computation(feat_t,feat_v_all,feat_a_all,feat_s_all)
-                elif run_cfg.train.modalities_ret == "TVASD":
-                    volume_orig = volume_computation(feat_t,feat_v_all,feat_a_all,feat_s_all,feat_d_all)
+            loss_dict['temperature_1'] = self.contra_temp_1
+            loss_dict['temperature_2'] = self.contra_temp_2
+            mean_volume = volume.mean()
+            loss_dict['smean-volume-train'] = mean_volume
+            min_volume = volume.min()
+            loss_dict['smin-volume-train'] = min_volume
 
-            elif run_cfg.train.ret_loss == "area":
-                if run_cfg.train.modalities_ret == "TV":
-                    assert False, "Area computation not implemented for TV"
-                if run_cfg.train.modalities_ret == "TVA":
-                    volume_orig = area_computation(feat_t,feat_v_all,feat_a_all)
-                elif run_cfg.train.modalities_ret == "TVAS":
-                    assert False, "Area computation not implemented for TVAS"
-                elif run_cfg.train.modalities_ret == "TVASD":
-                    assert False, "Area computation not implemented for TVASD"
+            volume = volume - (sim_tv + sim_ta)
 
+            volume = volume / self.contra_temp_1
 
-            with torch.no_grad():
-                loss_dict['temperature'] = self.contra_temp
-                mean_volume = volume_orig.mean()
-                loss_dict['smean-volume-train'] = mean_volume
-                min_volume = volume_orig.min()
-                loss_dict['smin-volume-train'] = min_volume
+            volumeT = volume_computation_takashi_3_optimized(feat_t_all,feat_v,feat_a).T
+            #volumeT = volume_computation3(feat_t_all,feat_v,feat_a).T
+            #volumeT = area_computation(feat_t_all,feat_v,feat_a).T
 
-            if run_cfg.train.nested_ret:
-                # TO BE MORE SPECIFIC
-                volume = volume_orig - (sim_tv + sim_ta)
-            else:
-                volume = volume_orig
-
-            volume = volume / self.contra_temp
-
-            # LET US COMPUTE THE Data-to-Text VOLUME
-            if run_cfg.train.ret_loss == "tetrahedron":
-                if run_cfg.train.modalities_ret == "TVA":
-                    volume_origT = volume_computation_takashi_3_optimized(feat_t_all,feat_v,feat_a).T
-                elif run_cfg.train.modalities_ret == "TVAS":
-                    #TODO implement volume computation with subtitles
-                    assert False, "Not implemented yet tetrahedron volume with subtitles"
-                elif run_cfg.train.modalities_ret == "TVASD":
-                    #TODO implement volume computation with subtitles and depth
-                    assert False, "Not implemented yet tetrahedron volume with subtitles and depth"
-            elif run_cfg.train.ret_loss == "gram":
-                if run_cfg.train.modalities_ret == "TV":
-                    volume_origT = volume_computation(feat_t_all,feat_v).T
-                if run_cfg.train.modalities_ret == "TVA":
-                    volume_origT = volume_computation(feat_t_all,feat_v,feat_a).T
-                elif run_cfg.train.modalities_ret == "TVAS":
-                    volume_origT = volume_computation(feat_t_all,feat_v,feat_a,feat_s).T
-                elif run_cfg.train.modalities_ret == "TVASD":
-                    volume_origT = volume_computation(feat_t_all,feat_v,feat_a,feat_s,feat_d).T
-            elif run_cfg.train.ret_loss == "area":
-                if run_cfg.train.modalities_ret == "TV":
-                    assert False, "Area computation not implemented for TV"
-                if run_cfg.train.modalities_ret == "TVA":
-                    volume_origT = area_computation(feat_t_all,feat_v,feat_a).T
-                elif run_cfg.train.modalities_ret == "TVAS":
-                    assert False, "Area computation not implemented for TVAS"
-                elif run_cfg.train.modalities_ret == "TVASD":
-                    assert False, "Area computation not implemented for TVASD"
-
-
-            if run_cfg.train.nested_ret:
-                # TO BE MORE SPECIFIC
-                volumeT = volume_origT - (sim_vt + sim_at)
-            else:
-                volumeT = volume_origT
-
-            volumeT = volumeT / self.contra_temp
+            volumeT = volumeT - (sim_vt + sim_at)
+            volumeT = volumeT / self.contra_temp_2
 
             rank = dist.get_rank()
             bs = feat_t.size(0)
@@ -580,226 +501,144 @@ class GRAM(MMGeneralModule):
 
             loss_area.append(loss)
 
+            #lalign = align_loss(feat_t, feat_v) + align_loss(feat_t, feat_a)
+            #luniform = (uniform_loss(feat_t) + uniform_loss(feat_v) + uniform_loss(feat_a)) / 3
+
+            #loss_dict["lalign"] = 0.25*lalign
+            #loss_dict["luniform"] = 0.25*luniform
+
+            s1 = []
+            s2 = []
+            s3 = []
+
+            for k in range(10):
+                #gram = simple_gram_matrix_computation(feat_t_all[k],feat_v_all[k],feat_a_all[k])
+                gram = simple_tethraedron_matrix_computation(feat_t_all[k],feat_v_all[k],feat_a_all[k])
+                U, S, Wt = np.linalg.svd(gram.float().detach().cpu().numpy())
+                s1.append(S[0])
+                s2.append(S[1])
+                #s3.append(S[2])
             
+            loss_dict['s1-train'] = np.mean(s1)
+            loss_dict['s2-train'] = np.mean(s2)
+            #loss_dict['s3-train'] = np.mean(s3)
+
+
+
+            #   AREA VID ITM 
+                     
+            condition_feats = self.batch_get(batch, f'condition_feats_va')#self.batch_get(batch, f'condition_feats_v')
+            condition_feats_collate = all_gather_with_grad(condition_feats)
+
+            #condition_feats_v = self.batch_get(batch, f'condition_feats_v')
+            #condition_feats_a = self.batch_get(batch, f'condition_feats_a')
+
+            #condition_feats_a_interpolated = torch.nn.functional.interpolate(condition_feats_a.permute(0,2,1), size=condition_feats_v.shape[1], mode='linear', align_corners=False).permute(0,2,1)
+            #print(condition_feats_a_interpolated.shape)
+
+            #condition_feats_a_interpolated = torch.nn.functional.interpolate(
+            #    condition_feats_a.permute(0, 2, 1).unsqueeze(-1),  # [1, 768, 256, 1]
+            #    size=(condition_feats_v.shape[1], 1),                      # target size for (H, W)
+            #    mode='bilinear',                    # or 'nearest', 'linear'
+            #    align_corners=False
+            #).squeeze(-1).permute(0, 2, 1)
+            #print(condition_feats_a_interpolated.shape)
+
+            #condition_feats = torch.cat([condition_feats_v.unsqueeze(1), condition_feats_a_interpolated.unsqueeze(1)], dim=1)
+            #print(condition_for_multimodal_self_attention.shape)
+
+            '''
+            condition_feat_v_not_reshaped = self.batch_get(batch, f'condition_feats_v')
+            condition_feats_a = self.batch_get(batch, f'condition_feats_a')
+
+            classification_tokens = condition_feat_v_not_reshaped[:,:,0,:].unsqueeze(2)
+            reshape_feat_v = condition_feat_v_not_reshaped[:,:,1:,:].reshape(condition_feat_v_not_reshaped.shape[0], condition_feat_v_not_reshaped.shape[1], 16,16,768)
+
+
+            # from bs, num frames, 16, 16, 768 to bs, num frames, 16 + 16, 768 where 16 is height and 16 is width and are computed as mean of rows and columns
+            feat_v_rows = reshape_feat_v.mean(dim=3).reshape(reshape_feat_v.shape[0], reshape_feat_v.shape[1], 16, 768)
+            feat_v_cols = reshape_feat_v.mean(dim=2).reshape(reshape_feat_v.shape[0], reshape_feat_v.shape[1], 16, 768)
+
+            # concatenate classification tokens to feat_v_rows and feat_v_cols, but place classification token at the beginning of each frame
+            condition_feats_tv = torch.cat([classification_tokens, feat_v_rows, feat_v_cols], dim=2)
+
+            condition_feats_a = condition_feats_a.reshape(condition_feats_a.shape[0], 1, 64, 4,  768)
+            condition_feats_a = condition_feats_a.transpose(2,3)
+            #("Condition feats a shape after transpose:", condition_feats_a.shape)
+            # reshape to bs, num frames, 4, 64/num frames, 768
+            condition_feats_a = condition_feats_a.reshape(condition_feats_a.shape[0], condition_feats_tv.shape[1], 4, -1, 768)
+            #print("Condition feats a shape after reshape:", condition_feats_a.shape)
+            condition_feats_a = condition_feats_a.reshape(condition_feats_a.shape[0], condition_feats_tv.shape[1], -1, 768)
+            #print("Condition feats a shape before mean pooling:", condition_feats_a.shape)
+            #compute mean over the 4th dimension
+            condition_feats_a = condition_feats_a.mean(dim=2)
+            #print("Condition feats a shape after mean pooling:", condition_feats_a.shape)
+            condition_feats_a = condition_feats_a.reshape(condition_feats_a.shape[0],condition_feats_tv.shape[1], -1, 768)
+            #print("Condition feats a shape after reshaping:", condition_feats_a.shape)
+
+            #expand condition_feats_a to match condition_feats_tv shape
+            condition_feats_a = condition_feats_a.expand(-1, -1, condition_feats_tv.shape[2], -1)
+            #print("Condition feats a shape after expanding:", condition_feats_a.shape)
+
+            condition_feats_a = condition_feats_a.reshape(condition_feats_tv.shape[0],  -1, 768)
+            #print("Condition feats a shape after reshaping:", condition_feats_a.shape)
+            condition_feats_tv = condition_feats_tv.reshape(condition_feats_tv.shape[0],  -1, 768)
+            #print("Condition feats tv shape after reshaping:", condition_feats_tv.shape)
+
+            #condition_feats_a_interpolated = torch.nn.functional.interpolate(condition_feats_a.permute(0,2,1), size=condition_feats_v.shape[1], mode='linear', align_corners=False).permute(0,2,1)
+            #pprint(condition_feats_a_interpolated.shape)
+
+            #condition_feats_a_interpolated = torch.nn.functional.interpolate(
+            #    condition_feats_a.permute(0, 2, 1).unsqueeze(-1),  # [1, 768, 256, 1]
+            #    size=(condition_feats_v.shape[1], 1),                      # target size for (H, W)
+            #    mode='bilinear',                    # or 'nearest', 'linear'
+            #    align_corners=False
+            #).squeeze(-1).permute(0, 2, 1)
+            #print(condition_feats_a_interpolated.shape)
+
+            #condition_for_multimodal_self_attention = torch.cat([condition_feats_v.unsqueeze(1), condition_feats_a_interpolated.unsqueeze(1)], dim=1)
+            condition_feats = torch.cat([condition_feats_tv.unsqueeze(1), condition_feats_a.unsqueeze(1)], dim=1)
+            '''
+            #condition_feats_collate = all_gather_with_grad(condition_feats)
 
 
             with torch.no_grad():
-                if run_cfg.train.ret_loss == "gram":
-                # COMPUTE GRAM SINGULAR VALUES
-                    if run_cfg.train.modalities_ret == "TV":
-                        s1 = []
-                        s2 = []
-                    elif run_cfg.train.modalities_ret == "TVA":
-                        s1 = []
-                        s2 = []
-                        s3 = []
-                    elif run_cfg.train.modalities_ret == "TVAS":
-                        s1 = []
-                        s2 = []
-                        s3 = []
-                        s4 = []
-                    elif run_cfg.train.modalities_ret == "TVASD":
-                        s1 = []
-                        s2 = []
-                        s3 = []
-                        s4 = []
-                        s5 = []
-                elif run_cfg.train.ret_loss == "tetrahedron":
-                    # COMPUTE TETRAHEDRON SINGULAR VALUES
-                    if run_cfg.train.modalities_ret == "TVA":
-                        s1 = []
-                        s2 = []
-                    elif run_cfg.train.modalities_ret == "TVAS":
-                        s1 = []
-                        s2 = []
-                        s3 = []
+                weights_t2cond = F.softmax(-(volume), dim=1) + 1e-4
+                weights_t2cond[:, rank * bs : rank * bs + bs].fill_diagonal_(0)
+                weights_cond2t = F.softmax(-(volumeT), dim=1) + 1e-4
+                weights_cond2t[:, rank * bs : rank * bs + bs].fill_diagonal_(0)
 
-                    elif run_cfg.train.modalities_ret == "TVASD":
-                        s1 = []
-                        s2 = []
-                        s3 = []
-                        s4 = []
+            condition_feats_neg = []
+            for b in range(bs): 
+                neg_idx = torch.multinomial(weights_t2cond[b], 1).item()
+                condition_feats_neg.append(condition_feats_collate[neg_idx])
+            condition_feats_neg = torch.stack(condition_feats_neg, dim=0)
 
-                for k in range(10):
-                    if run_cfg.train.ret_loss == "gram":
-                        if run_cfg.train.modalities_ret == "TV":
-                            #gram = simple_gram_matrix_computation(feat_t_all[k],feat_v_all[k])
-                            assert False, "Not implemented gram singular values for TV"
-                        elif run_cfg.train.modalities_ret == "TVA":
-                            gram = simple_gram_matrix_computation(feat_t_all[k],feat_v_all[k],feat_a_all[k])
-                        elif run_cfg.train.modalities_ret == "TVAS":
-                            #gram = simple_gram_matrix_computation(feat_t_all[k],feat_v_all[k],feat_a_all[k],feat_s_all[k])
-                            assert False, "Not implemented gram singular values for TVAS"
-                        elif run_cfg.train.modalities_ret == "TVASD":
-                            #gram = simple_gram_matrix_computation(feat_t_all[k],feat_v_all[k],feat_a_all[k],feat_s_all[k],feat_d_all[k])
-                            assert False, "Not implemented gram singular values for TVASD"
-                    elif run_cfg.train.ret_loss == "tetrahedron":
-                        if run_cfg.train.modalities_ret == "TVA":
-                            gram = simple_tethraedron_matrix_computation(feat_t_all[k],feat_v_all[k],feat_a_all[k])
-                        elif run_cfg.train.modalities_ret == "TVAS":
-                            #gram = simple_tethraedron_matrix_computation(feat_t_all[k],feat_v_all[k],feat_a_all[k],feat_s_all[k])
-                            assert False, "Not implemented tetrahedron singular values for TVAS"
-                        elif run_cfg.train.modalities_ret == "TVASD":
-                            #gram = simple_tethraedron_matrix_computation(feat_t_all[k],feat_v_all[k],feat_a_all[k],feat_s_all[k],feat_d_all[k])
-                            assert False, "Not implemented tetrahedron singular values for TVASD"
-                    
-                    U, S, Wt = np.linalg.svd(gram.float().detach().cpu().numpy())
+            text_ids_neg = []
+            text_atts_neg = []
+            for b in range(bs):
+                neg_idx = torch.multinomial(weights_cond2t[b], 1).item()
+                text_ids_neg.append(input_ids_collate[neg_idx])
+                text_atts_neg.append(attention_mask_collate[neg_idx])
 
-                    if run_cfg.train.ret_loss == "gram":
-                        if run_cfg.train.modalities_ret == "TV":
-                            #s1.append(S[0])
-                            #s2.append(S[1])
-                            assert False, "Not implemented gram singular values for TV"
-                        elif run_cfg.train.modalities_ret == "TVA":
-                            s1.append(S[0])
-                            s2.append(S[1])
-                            s3.append(S[2])
-                        elif run_cfg.train.modalities_ret == "TVAS":
-                            #s1.append(S[0])
-                            #s2.append(S[1])
-                            #s3.append(S[2])
-                            #s4.append(S[3])
-                            assert False, "Not implemented gram singular values for TVAS"
-                        elif run_cfg.train.modalities_ret == "TVASD":
-                            #s1.append(S[0])
-                            #s2.append(S[1])
-                            #s3.append(S[2])
-                            #s4.append(S[3])
-                            #s5.append(S[4])
-                            assert False, "Not implemented gram singular values for TVASD"
-                    elif run_cfg.train.ret_loss == "tetrahedron":
-                        if run_cfg.train.modalities_ret == "TVA":
-                            s1.append(S[0])
-                            s2.append(S[1])
-                        elif run_cfg.train.modalities_ret == "TVAS":
-                            s1.append(S[0])
-                            s2.append(S[1])
-                            s3.append(S[2])
-                        elif run_cfg.train.modalities_ret == "TVASD":
-                            s1.append(S[0])
-                            s2.append(S[1])
-                            s3.append(S[2])
-                            s4.append(S[3])
-
-                if run_cfg.train.ret_loss == "gram":
-                    if run_cfg.train.modalities_ret == "TV":
-                        #loss_dict['s1-train'] = np.mean(s1)
-                        #loss_dict['s2-train'] = np.mean(s2)
-                        assert False, "Not implemented gram singular values for TV"
-                    elif run_cfg.train.modalities_ret == "TVA":
-                        loss_dict['s1-train'] = np.mean(s1)
-                        loss_dict['s2-train'] = np.mean(s2)
-                        loss_dict['s3-train'] = np.mean(s3)
-                    elif run_cfg.train.modalities_ret == "TVAS":
-                        #loss_dict['s1-train'] = np.mean(s1)
-                        #loss_dict['s2-train'] = np.mean(s2)
-                        #loss_dict['s3-train'] = np.mean(s3)
-                        #loss_dict['s4-train'] = np.mean(s4)
-                        assert False, "Not implemented gram singular values for TVAS"
-                    elif run_cfg.train.modalities_ret == "TVASD":
-                        #loss_dict['s1-train'] = np.mean(s1)
-                        #loss_dict['s2-train'] = np.mean(s2)
-                        #loss_dict['s3-train'] = np.mean(s3)
-                        #loss_dict['s4-train'] = np.mean(s4)
-                        #loss_dict['s5-train'] = np.mean(s5)
-                        assert False, "Not implemented gram singular values for TVASD"
-                elif run_cfg.train.ret_loss == "tetrahedron":
-                    if run_cfg.train.modalities_ret == "TVA":
-                        loss_dict['s1-train'] = np.mean(s1)
-                        loss_dict['s2-train'] = np.mean(s2)
-                    elif run_cfg.train.modalities_ret == "TVAS":
-                        loss_dict['s1-train'] = np.mean(s1)
-                        loss_dict['s2-train'] = np.mean(s2)
-                        loss_dict['s3-train'] = np.mean(s3)
-                    elif run_cfg.train.modalities_ret == "TVASD":   
-                        loss_dict['s1-train'] = np.mean(s1)
-                        loss_dict['s2-train'] = np.mean(s2)
-                        loss_dict['s3-train'] = np.mean(s3)
-                        loss_dict['s4-train'] = np.mean(s4)
-
-
-            #   VOLUME LOSS ITM 
-            #print("Subtasks:", subtasks)
-            for task in subtasks:
-                #print("Processing task:", task)
-                assert task in ['tv','ta','tva','tvs','tvas','tvasd']
-                if task not in ['tv','ta','tva','tvs','tvas','tvasd']:
-                    continue
-                if task == "tv":
-                    condition_feats = self.batch_get(batch, f'condition_feats_v')
-                    condition_feats_collate = all_gather_with_grad(condition_feats)
-                    with torch.no_grad():
-                        sim_tv = feat_t @ feat_v_all.T
-                        sim_tv = sim_tv / self.contra_temp #0.04
-                        sim_vt = feat_v @ feat_t_all.T
-                        sim_vt = sim_vt / self.contra_temp #0.04
-                        weights_t2cond = F.softmax(sim_tv, dim=1) + 1e-4
-                        weights_t2cond[:, rank * bs : rank * bs + bs].fill_diagonal_(0)
-                        weights_cond2t = F.softmax(sim_vt, dim=1) + 1e-4
-                        weights_cond2t[:, rank * bs : rank * bs + bs].fill_diagonal_(0)
-                if task == "ta":
-                    condition_feats = self.batch_get(batch, f'condition_feats_a')
-                    condition_feats_collate = all_gather_with_grad(condition_feats)
-                    with torch.no_grad():
-                        sim_ta = feat_t @ feat_a_all.T
-                        sim_ta = sim_ta / self.contra_temp #0.04
-                        sim_at = feat_a @ feat_t_all.T
-                        sim_at = sim_at / self.contra_temp #0.04
-                        weights_t2cond = F.softmax(sim_ta, dim=1) + 1e-4
-                        weights_t2cond[:, rank * bs : rank * bs + bs].fill_diagonal_(0)
-                        weights_cond2t = F.softmax(sim_at, dim=1) + 1e-4
-                        weights_cond2t[:, rank * bs : rank * bs + bs].fill_diagonal_(0)
-                if task == "tva":
-                    condition_feats = self.batch_get(batch, f'condition_feats_va')#self.batch_get(batch, f'condition_feats_v')
-                    condition_feats_collate = all_gather_with_grad(condition_feats)
-
-                    with torch.no_grad():
-                        if run_cfg.train.nested_ret:
-                            volume = volume_orig - (sim_tv + sim_ta) 
-                        else:
-                            volume = volume_orig
-                        volume = volume / self.contra_temp #0.04 
-                        if run_cfg.train.nested_ret:
-                            volumeT = volume_origT - (sim_vt + sim_at)
-                        else:
-                            volumeT = volume_origT
-                        volumeT = volumeT / self.contra_temp #0.04
-                        weights_t2cond = F.softmax(-(volume), dim=1) + 1e-4
-                        weights_t2cond[:, rank * bs : rank * bs + bs].fill_diagonal_(0)
-                        weights_cond2t = F.softmax(-(volumeT), dim=1) + 1e-4
-                        weights_cond2t[:, rank * bs : rank * bs + bs].fill_diagonal_(0)
-
-                condition_feats_neg = []
-                for b in range(bs): 
-                    neg_idx = torch.multinomial(weights_t2cond[b], 1).item()
-                    condition_feats_neg.append(condition_feats_collate[neg_idx])
-                condition_feats_neg = torch.stack(condition_feats_neg, dim=0)
-
-                text_ids_neg = []
-                text_atts_neg = []
-                for b in range(bs):
-                    neg_idx = torch.multinomial(weights_cond2t[b], 1).item()
-                    text_ids_neg.append(input_ids_collate[neg_idx])
-                    text_atts_neg.append(attention_mask_collate[neg_idx])
-
-                text_ids_neg = torch.stack(text_ids_neg, dim=0)
-                text_atts_neg = torch.stack(text_atts_neg, dim=0)
-
-                input_ids_1 = torch.cat((input_ids, input_ids, text_ids_neg),dim=0)
-                attention_mask_1 = torch.cat((attention_mask, attention_mask, text_atts_neg),dim=0)
-
-                condition_feats = torch.cat((condition_feats,condition_feats_neg,condition_feats),dim=0)
-                output = self.multimodal_encoder.bert(input_ids = input_ids_1,
-                                            attention_mask = attention_mask_1,
-                                            encoder_hidden_states=condition_feats,
-                                            gram_attention=False
-                                            ).last_hidden_state
-                batch_size = condition_feats_neg.shape[0]
-                logits = self.itm_head(output[:,0].half())
-                ground_truth = torch.zeros(batch_size*3).long().cuda()
-                ground_truth[:batch_size] = 1
-                loss = F.cross_entropy(logits,ground_truth) #itm (dtm)
-                loss_itm.append(self.itm_ratio * loss)
+            text_ids_neg = torch.stack(text_ids_neg, dim=0)
+            text_atts_neg = torch.stack(text_atts_neg, dim=0)
+        
+            input_ids_1 = torch.cat((input_ids, input_ids, text_ids_neg),dim=0)
+            attention_mask_1 = torch.cat((attention_mask, attention_mask, text_atts_neg),dim=0)
+            
+            condition_feats = torch.cat((condition_feats,condition_feats_neg,condition_feats),dim=0)
+            output = self.multimodal_encoder.bert(input_ids = input_ids_1,
+                                        attention_mask = attention_mask_1,
+                                        encoder_hidden_states=condition_feats,
+                                        gram_attention=False
+                                        ).last_hidden_state
+            batch_size = condition_feats_neg.shape[0]
+            logits = self.itm_head(output[:,0].half())
+            ground_truth = torch.zeros(batch_size*3).long().cuda()
+            ground_truth[:batch_size] = 1
+            loss = F.cross_entropy(logits,ground_truth) #itm (dtm)
+            loss_itm.append(self.itm_ratio * loss)
 
             ### finalize        
             loss_itm = sum(loss_itm)/len(loss_itm)
@@ -818,19 +657,25 @@ class GRAM(MMGeneralModule):
             feat_a = self.batch_get(batch,'feat_a')
             evaluation_dict['feat_a'] = feat_a
 
-            if "raw_subtitles" in batch.keys(): 
-                feat_s = self.batch_get(batch,'feat_s')
-                evaluation_dict['feat_s'] = feat_s
-            if "depth_pixels" in batch.keys():
-                feat_d = self.batch_get(batch,'feat_d')
-                evaluation_dict['feat_d'] = feat_d
+            #feat_v_all = self.batch_get(batch,'feat_v_all')
+            #evaluation_dict['feat_v_all'] = feat_v_all
+            
+            #if "raw_subtitles" in batch.keys(): 
+            #    feat_s = self.batch_get(batch,'feat_s')
+            #    evaluation_dict['feat_s'] = feat_s
+            #if "depth_pixels" in batch.keys():
+            #    feat_d = self.batch_get(batch,'feat_d')
+            #    evaluation_dict['feat_d'] = feat_d
             
 
             caption_tokens = self.batch_get(batch,'caption_tokens')
             evaluation_dict['input_ids'] = caption_tokens.input_ids
             evaluation_dict['attention_mask'] = caption_tokens.attention_mask
             for task in subtasks:
+                #### compute_itc
                 assert task in ['tv','ta','tva','tvs','tvas','tvasd']
+                # feat_cond = self.batch_get(batch,f'feat_{task[1:]}')
+                # evaluation_dict[f'feat_cond_{task}'] = feat_cond
 
                 condition_feats = self.batch_get(batch, f'condition_feats_{task[1:]}')
                 evaluation_dict[f'condition_feats_{task}'] = condition_feats
@@ -839,7 +684,7 @@ class GRAM(MMGeneralModule):
 
             return evaluation_dict
 
-    def forward_cap(self, batch, task, compute_loss=True, run_cfg=None):
+    def forward_cap(self, batch, task, compute_loss=True):
         subtasks = task.split('%')[1:]
 
         if compute_loss:
@@ -911,7 +756,7 @@ class GRAM(MMGeneralModule):
 
 
 
-    def forward_qa(self, batch, task, compute_loss=True, run_cfg=None):
+    def forward_qa(self, batch, task, compute_loss=True):
         subtasks = task.split('%')[1:]
         raw_questions = batch.raw_questions
         raw_answers = batch.raw_answers

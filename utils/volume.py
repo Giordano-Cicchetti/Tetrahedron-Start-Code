@@ -11,6 +11,29 @@ import numpy as np
 import torch.nn.functional as F
 import torch
 
+
+def simple_volume_computation(language, video, audio):
+    A = torch.stack([language, video, audio])
+    G = A @ A.T
+    gramian = torch.linalg.det(G)
+    return torch.sqrt(gramian)
+
+def simple_gram_matrix_computation(language, video, audio):
+    A = torch.stack([language, video, audio])
+    G = A @ A.T
+    return G
+
+def simple_tethraedron_matrix_computation(language, video, audio):
+
+    v1 = video - language
+    v2 = audio - language
+
+    a = [v1, v2]
+    a = torch.stack(a, dim=0)  # shape: [batch_size, 3, feature_dim]
+    G = a @ a.T  # shape: [batch_size, 3, 3]
+    return G
+
+
 def volume_computation_takashi_3_optimized(language, video, audio):
     """
     Memory-efficient version of Takashi GPU function.
@@ -78,13 +101,28 @@ def volume_computation_takashi_gpu_3(language, video, audio):
     res = torch.sqrt(torch.abs(gram_det)) / 6
 
     return res  # shape (B, N)
-
-
-def volume_computation_takashi_single(language, video, audio, subtitles):
+def volume_computation_takashi_single3(language, video, audio):
     print("language shape:", language.shape)
     print("video shape:", video.shape)
     print("audio shape:", audio.shape)
-    print("subtitles shape:", subtitles.shape)
+
+    v1 = video - language
+    v2 = audio - language
+
+
+    a = [v1, v2]
+    a = torch.stack(a, dim=0)  # shape: [batch_size, 3, feature_dim]
+    print("a shape:", a.shape)
+    G = a @ a.T  # shape: [batch_size, 3, 3]
+    print("G shape:", G.shape)
+    gram_det = torch.det(G.float())
+    res = torch.sqrt(torch.abs(gram_det))
+    res = res/6 # normalize by 4! = 24
+    print("res shape:", res.shape)
+    print("res:", res)
+    return res
+
+def volume_computation_takashi_single(language, video, audio, subtitles):
 
     v1 = video - language
     v2 = audio - language
@@ -93,14 +131,10 @@ def volume_computation_takashi_single(language, video, audio, subtitles):
 
     a = [v1, v2, v3]
     a = torch.stack(a, dim=0)  # shape: [batch_size, 3, feature_dim]
-    print("a shape:", a.shape)
     G = a @ a.T  # shape: [batch_size, 3, 3]
-    print("G shape:", G.shape)
     gram_det = torch.det(G.float())
     res = torch.sqrt(torch.abs(gram_det))
     res = res/24 # normalize by 4! = 24
-    print("res shape:", res.shape)
-    print("res:", res)
     return res
 
 feat_t = torch.randn(4, 768)  #(batch_size, feature_dim)
@@ -130,11 +164,41 @@ for i in range(feat_t.shape[0]):
     volume.append(volume_tensor)
 
 volume = torch.stack(volume)
-print("volume shape:", volume.shape)  #(batch_size, num_frames)S
-print(volume)
+#print("volume shape:", volume.shape)  #(batch_size, num_frames)S
+#print(volume)
+
+
+def area_computation(language, video, audio):
+
+
+    #print(f"norm language= {torch.sum(language ** 2, dim=1)}")
+    
+    language_expanded = language.unsqueeze(1)  # Shape: (n, 1, dim)
+
+    # Compute the differences for all pairs (i-th language embedding with all j-th video/audio embeddings)
+    u = language_expanded - video.unsqueeze(0)  # Shape: (n, n, dim)
+    v = language_expanded - audio.unsqueeze(0)  # Shape: (n, n, dim)
+
+    # Compute the norms for u and v
+    u_norm = torch.sum(u ** 2, dim=2)  # Shape: (n, n)
+    v_norm = torch.sum(v ** 2, dim=2)  # Shape: (n, n)
+
+    # Compute the dot products for all pairs
+    uv_dot = torch.sum(u * v, dim=2)  # Shape: (n, n)
+
+    # Calculate the area for all pairs. I remove sqrt calculation
+    area = ((u_norm * v_norm) - (uv_dot ** 2))/2#torch.sqrt((u_norm * v_norm) - (uv_dot ** 2)) / 2  # Shape: (n, n)
+    
+    return area
 
 import torch
 import torch.nn.functional as F
+
+def align_loss(x, y, alpha=2):
+    return (x - y).norm(p=2, dim=1).pow(alpha).mean()
+
+def uniform_loss(x, t=2):
+    return torch.pdist(x, p=2).pow(2).mul(-t).exp().mean().log()
 
 def volume_computation_takashi_gpu(language, video, audio, subtitles):
     """
@@ -172,17 +236,17 @@ def volume_computation_takashi_gpu(language, video, audio, subtitles):
 
 
 volume = volume_computation_takashi_gpu(feat_t, feat_v, feat_a, feat_s)
-print("volume shape (GPU):", volume.shape)  #(batch_size, num_frames)
-print(volume)
+#print("volume shape (GPU):", volume.shape)  #(batch_size, num_frames)
+#print(volume)
 
 
 volume = volume_computation_takashi_3_optimized(feat_t, feat_v, feat_a)
-print("volume shape (GPU 3 optimized):", volume.shape)  #(batch_size, num_frames)
-print(volume)
+#print("volume shape (GPU 3 optimized):", volume.shape)  #(batch_size, num_frames)
+#print(volume)
 
 volume = volume_computation_takashi_gpu_3(feat_t, feat_v, feat_a)
-print("volume shape (GPU 3):", volume.shape)  #(batch_size, num_frames)
-print(volume)
+#print("volume shape (GPU 3):", volume.shape)  #(batch_size, num_frames)
+#print(volume)
 
 
 
@@ -449,3 +513,40 @@ def volume_computation(language, *inputs):
     # Compute the square root of the absolute value of the determinants
     res = torch.sqrt(torch.abs(gram_det))
     return res
+
+
+
+
+def multimodal_volume(x):
+    """
+    x: Tensor of shape (B, N, D)
+       B = batch size
+       N = number of inputs/modalities
+       D = latent dimension
+
+    Returns:
+        volumes: shape (B,)
+    """
+    # x already contains all modalities → treat it as A
+    # A = (B, N, D)
+    A = x
+
+    # Compute Gram matrix G = A A^T → (B, N, N)
+    G = A @ A.transpose(-1, -2)
+
+    # Determinant for each batch element (B,)
+    detG = torch.linalg.det(G.float())
+
+    # Volume = sqrt(det(G))
+    volume = torch.sqrt(detG.clamp(min=0))
+
+    return volume
+
+
+B, N, D = 8, 8, 128   # 5 modalities
+x = torch.randn(B, N, D)
+x = F.normalize(x, dim=-1)
+
+volumes = multimodal_volume(x)
+print(volumes)         # tensor of shape (B,)
+print(volumes.shape)   # torch.Size([8])

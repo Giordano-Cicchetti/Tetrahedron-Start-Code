@@ -28,11 +28,11 @@ def main():
         # start a new wandb run to track this script
         wandb.init(
         # set the wandb project where this run will be logged
-        project ="Training_scratch_msrvtt",
+        project ="Tetrahedron Project",
 
         # track hyperparameters and run metadata
         config={
-        "desc":f"Train_NOITM_{args.data_cfg.train[0]['name']}",
+        "desc":f"Train_{args.data_cfg.train[0]['name']}",
         "batch-size-train": args.data_cfg.train[0]['batch_size'],
         "batch-size-val": args.data_cfg.val[0]['batch_size'],
         "ngpus":4,

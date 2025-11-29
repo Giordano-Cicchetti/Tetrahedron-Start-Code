@@ -434,6 +434,17 @@ class MMGeneralModule(nn.Module):
         feature = torch.mean(feature, dim=1)
         return feature
 
+    def pool_vision_for_contra_no_mean(self, feature):  #feature b ,n ,x ,c
+        #### always use frame_avg  for retrieval
+        if self.config.vision_encoder_type.startswith('clip') or self.config.vision_encoder_type.startswith('evaclip'):
+            feature = feature[:,:,0]
+        elif self.config.vision_encoder_type.startswith('swin'):
+            feature = feature.mean(dim=2)
+
+
+        #feature = torch.mean(feature, dim=1)
+        return feature
+
 
     def pool_text_for_contra(self, feature):  #feature b ,n ,x, c
         return feature[:,0]
@@ -506,6 +517,8 @@ class MMGeneralModule(nn.Module):
 
         if hasattr(self,'vision_type_embeddings'): ### for three modality
             vision_output =  vision_output + self.vision_type_embeddings
+
+        #vision_output = vision_output.reshape(b,n,x,self.multimodal_dim)
 
         # vision_output = vision_output[:,:450]
         return vision_output

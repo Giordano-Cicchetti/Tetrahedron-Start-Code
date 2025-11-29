@@ -322,7 +322,11 @@ class BertSelfAttention(nn.Module):
 
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
+        #self.key1 = nn.Linear(config.hidden_size, self.all_head_size)
+        #self.key2 = nn.Linear(config.hidden_size, self.all_head_size)
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        #self.value1 = nn.Linear(config.hidden_size, self.all_head_size)
+        #self.value2 = nn.Linear(config.hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.position_embedding_type = position_embedding_type or getattr(
@@ -369,10 +373,10 @@ class BertSelfAttention(nn.Module):
             ##print("gram_attention in BertCrossAttention:", gram_attention)
             if gram_attention:
                 #print("Using gram_attention cross attention")
-                key_1_layer = self.transpose_for_scores(self.key(encoder_hidden_states[:, 0, :, :]).squeeze(1))
-                value_1_layer = self.transpose_for_scores(self.value(encoder_hidden_states[:, 0, :, :]).squeeze(1))
-                key_2_layer = self.transpose_for_scores(self.key(encoder_hidden_states[:, 1, :, :]).squeeze(1))
-                value_2_layer = self.transpose_for_scores(self.value(encoder_hidden_states[:, 1, :, :]).squeeze(1))
+                key_1_layer = self.transpose_for_scores(self.key1(encoder_hidden_states[:, 0, :, :]).squeeze(1))
+                value_1_layer = self.transpose_for_scores(self.value1(encoder_hidden_states[:, 0, :, :]).squeeze(1))
+                key_2_layer = self.transpose_for_scores(self.key2(encoder_hidden_states[:, 1, :, :]).squeeze(1))
+                value_2_layer = self.transpose_for_scores(self.value2(encoder_hidden_states[:, 1, :, :]).squeeze(1))
 
                 #print("key_1_layer shape:", key_1_layer.shape)
                 #print("key_2_layer shape:", key_2_layer.shape)
@@ -731,7 +735,7 @@ class BertEncoder(nn.Module):
 
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
-                        return module(*inputs, past_key_value, output_attentions)
+                        return module(*inputs, past_key_value, output_attentions, gram_attention=gram_attention)
 
                     return custom_forward
 
@@ -742,7 +746,6 @@ class BertEncoder(nn.Module):
                     layer_head_mask,
                     encoder_hidden_states,
                     encoder_attention_mask,
-                    gram_attention=gram_attention,
                 )
             else:
                 layer_outputs = layer_module(

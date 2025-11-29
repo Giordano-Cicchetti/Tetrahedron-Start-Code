@@ -13,8 +13,10 @@ from evaluation_tools.vqa_tools.vqa_eval import VQAEval
 from utils.logger import LOGGER
 from utils.distributed import  all_gather_list, ddp_allgather
 from utils.tool import NoOp
+from utils.metrics import compute_gap, compute_mean_angular_value_of_a_modality, mean_distance_of_true_pairs, compute_rmg
 from easydict import EasyDict as edict
-from utils.volume import volume_computation4,volume_computation3, volume_computation5, volume_computation_takashi_gpu
+from utils.volume import volume_computation4,volume_computation3, volume_computation5, volume_computation_takashi_gpu, volume_computation_takashi_3_optimized,simple_gram_matrix_computation,simple_tethraedron_matrix_computation
+from utils.volume import area_computation, volume_computation
 import wandb
 
 
@@ -40,7 +42,7 @@ def evaluate_single(model, val_loader, task, run_cfg, global_step,dset_name):
 
     for task in tasks:
         if task.startswith('ret'):
-            ret_dict = evaluate_ret(model, task, val_loader, global_step)
+            ret_dict = evaluate_ret(model, task, val_loader, global_step, run_cfg)
             output_ls.append(ret_dict)
         elif task.startswith('cap'):
             cap_dict = evaluate_cap(model, task, val_loader, run_cfg, global_step, dset_name)
@@ -170,12 +172,14 @@ def evaluate_cap(model, tasks, eval_loader, run_cfg, global_step, dset_name):
 
 
 @torch.no_grad()
-def evaluate_ret(model, tasks, val_loader, global_step):
+def evaluate_ret(model, tasks, val_loader, global_step, run_cfg):
     val_log = {}
     ids = []
     ids_txt = []
     input_ids = []
     attention_mask = []
+
+    print(f"RUN CFG IN EVAL: ret_loss={run_cfg.test.ret_loss} , modalities_ret={run_cfg.test.modalities_ret}, modalities_itm={run_cfg.test.modalities_itm}, nested_ret={run_cfg.test.nested_ret}")
  
     subtasks = tasks.split('%')[1:]
     store_dict = {}
@@ -244,35 +248,160 @@ def evaluate_ret(model, tasks, val_loader, global_step):
     if len(feat_d)>0:
         feat_d = torch.cat(feat_d, dim = 0)
         feat_d = ddp_allgather(feat_d)
-    # torch.save(feat_t,f"./experiments/{global_step}text_features_msrvtt.pt")
-    # torch.save(feat_v,f"./experiments/{global_step}video_features_msrvtt.pt")
-    # torch.save(feat_a,f"./experiments/{global_step}audio_features_msrvtt.pt")
-    #torch.save(feat_s,f"./experiments/{global_step}subtitles_features_msrvtt.pt")
-    #if len(feat_s)>0:
-    #    if len(feat_d)>0:
-    #        area = volume_computation5(feat_t,feat_v,feat_a,feat_s,feat_d)
-    #        print("Using 5-modality volume computation")
-    #    else:
-    #        print("Using 4-modality volume computation")
-    #        area = volume_computation4(feat_t,feat_v,feat_a,feat_s) #(feat_t,feat_v,feat_a)
-    #else:
-    #    print("Using 3-modality volume computation")
-    #    area = volume_computation3(feat_t,feat_v,feat_a)
 
-    area = volume_computation3(feat_t,feat_v,feat_a)#,feat_s) #(feat_t,feat_v,feat_a)
-    print("Area shape:", area.shape)
+    if run_cfg.test.ret_loss == 'tetrahedron':
+        if run_cfg.test.modalities_ret == 'TV':
+            #TODO: optimize for TV
+            #area = volume_computation_takashi_2_optimized(feat_t,feat_v)
+            assert False, "Tetrehedron 2 modalities Not implemented yet"
+        if run_cfg.test.modalities_ret == 'TVA':
+            area = volume_computation_takashi_3_optimized(feat_t,feat_v,feat_a)
+        if run_cfg.test.modalities_ret == 'TVAS':
+            #TODO: optimize for TVAS
+            #area = volume_computation_takashi_4_optimized(feat_t,feat_v,feat_a,feat_s)
+            assert False, "Tetrehedron 4 modalities Not implemented yet"
+        if run_cfg.test.modalities_ret == 'TVASD':
+            assert False, "Tetrehedron 5 modalities Not implemented yet"
+    
+    elif run_cfg.test.ret_loss == 'gram':
+        if run_cfg.test.modalities_ret == 'TV':
+            area = volume_computation(feat_t,feat_v)
+        if run_cfg.test.modalities_ret == 'TVA':
+            area = volume_computation(feat_t,feat_v,feat_a)
+        if run_cfg.test.modalities_ret == 'TVAS':   
+            area = volume_computation(feat_t,feat_v,feat_a,feat_s)
+        if run_cfg.test.modalities_ret == 'TVASD':   
+            area = volume_computation(feat_t,feat_v,feat_a,feat_s, feat_d)
+
+    elif run_cfg.test.ret_loss == 'triangle':
+        if run_cfg.test.modalities_ret == 'TV':
+            assert False, "Triangle loss for 2 modalities Not implementable"
+        if run_cfg.test.modalities_ret == 'TVA':
+            area = volume_computation3(feat_t,feat_v,feat_a)
+        if run_cfg.test.modalities_ret == 'TVAS':   
+            assert False, "Triangle loss for 4 modalities Not implementable"
+        if run_cfg.test.modalities_ret == 'TVASD':   
+            assert False, "Triangle loss for 5 modalities Not implementable"
+
+
+    # LOGGING SINGULAR VALUES FOR TETRAHEDRON MATRIX or GRAM MATRIX
+    if run_cfg.test.ret_loss == 'tetrahedron' or run_cfg.test.ret_loss == 'gram':
+        if run_cfg.test.ret_loss == 'tetrahedron' and run_cfg.test.modalities_ret == 'TVA':
+            s1 = []
+            s2 = []
+        if run_cfg.test.ret_loss == 'tetrahedron' and run_cfg.test.modalities_ret == 'TVAS':
+            s1 = []
+            s2 = []
+            s3 = []
+        if run_cfg.test.ret_loss == 'tetrahedron' and run_cfg.test.modalities_ret == 'TVASD':
+            s1 = []
+            s2 = []
+            s3 = []
+            s4 = []
+        if run_cfg.test.ret_loss == 'gram' and run_cfg.test.modalities_ret == 'TV':
+            s1 = []
+            s2 = []
+        if run_cfg.test.ret_loss == 'gram' and run_cfg.test.modalities_ret == 'TVA':
+            s1 = []
+            s2 = []
+            s3 = []
+        if run_cfg.test.ret_loss == 'gram' and run_cfg.test.modalities_ret == 'TVAS':
+            s1 = []
+            s2 = []
+            s3 = []
+            s4 = []
+        if run_cfg.test.ret_loss == 'gram' and run_cfg.test.modalities_ret == 'TVASD':
+            s1 = []
+            s2 = []
+            s3 = []
+            s4 = []
+            s5 = []
+
+        for k in range(100):
+            if run_cfg.test.ret_loss == 'gram':
+                if run_cfg.test.modalities_ret == 'TV':
+                    #TODO build simple gram matrix computation for 2 modalities
+                    #matrix = simple_gram_matrix_computation(feat_t[k],feat_v[k])
+                    assert False, "Gram matrix for 2 modalities Not implemented yet"
+                if run_cfg.test.modalities_ret == 'TVA':
+                    matrix = simple_gram_matrix_computation(feat_t[k],feat_v[k],feat_a[k])
+                    U, S, Wt = np.linalg.svd(matrix.cpu().numpy())
+                    s1.append(S[0])
+                    s2.append(S[1])
+                    s3.append(S[2])
+                if run_cfg.test.modalities_ret == 'TVAS':   
+                    #TODO build simple gram matrix computation for 4 modalities
+                    #matrix = simple_gram_matrix_computation(feat_t[k],feat_v[k],feat_a[k],feat_s[k])
+                    assert False, "Gram matrix for 4 modalities Not implemented yet"
+                if run_cfg.test.modalities_ret == 'TVASD':
+                    #TODO build simple gram matrix computation for 5 modalities
+                    #matrix = simple_gram_matrix_computation(feat_t[k],feat_v[k],feat_a[k],feat_s[k], feat_d[k])
+                    assert False, "Gram matrix for 5 modalities Not implemented yet"
         
-    min_values_volume = torch.min(area, 1).values
+            if run_cfg.test.ret_loss == 'tetrahedron':
+                if run_cfg.test.modalities_ret == 'TVA':
+                    matrix = simple_tethraedron_matrix_computation(feat_t[k],feat_v[k],feat_a[k])
+                    U, S, Wt = np.linalg.svd(matrix.cpu().numpy())
+                    s1.append(S[0])
+                    s2.append(S[1])
+                if run_cfg.test.modalities_ret == 'TVAS':
+                    #matrix = simple_tethraedron_matrix_computation(feat_t[k],feat_v[k],feat_a[k],feat_s[k])
+                    assert False, "Tetrahedron matrix for 4 modalities Not implemented yet"
+                if run_cfg.test.modalities_ret == 'TVASD':
+                    assert False, "Tetrahedron matrix for 5 modalities Not implemented yet"
+
+        if run_cfg.test.ret_loss == 'tetrahedron' and run_cfg.test.modalities_ret == 'TVA':
+            val_log['s1-test'] = np.mean(s1).item()
+            val_log['s2-test'] = np.mean(s2).item()
+        if run_cfg.test.ret_loss == 'tetrahedron' and run_cfg.test.modalities_ret == 'TVAS':
+            val_log['s1-test'] = np.mean(s1).item()
+            val_log['s2-test'] = np.mean(s2).item()
+            val_log['s3-test'] = np.mean(s3).item()
+        if run_cfg.test.ret_loss == 'gram' and run_cfg.test.modalities_ret == 'TV':
+            val_log['s1-test'] = np.mean(s1).item()
+            val_log['s2-test'] = np.mean(s2).item()
+        if run_cfg.test.ret_loss == 'gram' and run_cfg.test.modalities_ret == 'TVA':
+            val_log['s1-test'] = np.mean(s1).item()
+            val_log['s2-test'] = np.mean(s2).item()
+            val_log['s3-test'] = np.mean(s3).item()
+        if run_cfg.test.ret_loss == 'gram' and run_cfg.test.modalities_ret == 'TVAS':
+            val_log['s1-test'] = np.mean(s1).item()
+            val_log['s2-test'] = np.mean(s2).item()
+            val_log['s3-test'] = np.mean(s3).item()
+            val_log['s4-test'] = np.mean(s4).item()
+        if run_cfg.test.ret_loss == 'gram' and run_cfg.test.modalities_ret == 'TVASD':
+            val_log['s1-test'] = np.mean(s1).item()
+            val_log['s2-test'] = np.mean(s2).item()
+            val_log['s3-test'] = np.mean(s3).item()
+            val_log['s4-test'] = np.mean(s4).item()
+            val_log['s5-test'] = np.mean(s5).item()
+
+
+    min_values_volume = area.diag()
     mean_values_volume = torch.mean(min_values_volume)
-    val_log[f"gramian_value"] = {"value": mean_values_volume.item()}
-    
-    
-    log = compute_metric_ret_area(area, ids, ids_txt, direction='forward')
+    val_log[f"gramian_value_true_samples"] = {"value": mean_values_volume.item()}
+
+
+    mean_volume = area.mean().item()
+    val_log[f"mean_gramian_value"] = {"value": mean_volume}
+
+    sim_tv = torch.matmul(feat_t, feat_v.t())
+    sim_ta = torch.matmul(feat_t, feat_a.t())
+
+    if run_cfg.test.nested_ret:
+        log = compute_metric_ret_area(area-sim_tv-sim_ta, ids, ids_txt, direction='forward')
+    else:
+        log = compute_metric_ret_area(area, ids, ids_txt, direction='forward')
+
     log = {k.replace('forward','volume_T2D'): v for k,v in log.items()}
 
     val_log[f'ret_area_forward'] = log
 
-    log = compute_metric_ret_area(area.T, ids, ids_txt, direction='forward')
+    if run_cfg.test.nested_ret:
+        log = compute_metric_ret_area(area.T -sim_tv.T -sim_ta.T , ids, ids_txt, direction='forward')
+    else:
+        log = compute_metric_ret_area(area.T, ids, ids_txt, direction='forward')
+
     log = {k.replace('backward','volume_D2T'): v for k,v in log.items()}
 
     val_log[f'ret_area_backard'] = log
@@ -280,40 +409,33 @@ def evaluate_ret(model, tasks, val_loader, global_step):
     print("Evaluation Results at step {}: {}".format(global_step, val_log))
     
 
-    # video_similarity = feat_t @ feat_v.T
+    if run_cfg.test.modalities_itm == 'TV':
+        store_dict[f'condition_feats_tv'] = torch.cat(store_dict[f'condition_feats_tv'],dim=0)
+    elif run_cfg.test.modalities_itm == 'TA':
+        store_dict[f'condition_feats_ta'] = torch.cat(store_dict[f'condition_feats_ta'],dim=0)
+    elif run_cfg.test.modalities_itm == 'TVA':
+        store_dict[f'condition_feats_tva'] = torch.cat(store_dict[f'condition_feats_tva'],dim=0)
+    elif run_cfg.test.modalities_itm == 'TVAS':
+        store_dict[f'condition_feats_tvas'] = torch.cat(store_dict[f'condition_feats_tvas'],dim=0)
+    elif run_cfg.test.modalities_itm == 'TVASD':
+        store_dict[f'condition_feats_tvasd'] = torch.cat(store_dict[f'condition_feats_tvasd'],dim=0)
 
-    # log = compute_metric_ret_area((area - video_similarity), ids, ids_txt, direction='backward')
-    # log = {k.replace('backward','area_video'): v for k,v in log.items()}
-    # val_log[f'ret_area_back_with_video'] = log
-
-    condition_feats_v = torch.cat(store_dict['condition_feats_tv'],dim=0)
-    condition_feats_a = torch.cat(store_dict['condition_feats_ta'],dim=0)
-
-    condition_feats_a_interpolated = torch.nn.functional.interpolate(condition_feats_a.permute(0,2,1), size=condition_feats_v.shape[1], mode='linear', align_corners=False).permute(0,2,1)
-    print(condition_feats_a_interpolated.shape)
-
-    condition_feats_a_interpolated = torch.nn.functional.interpolate(
-        condition_feats_a.permute(0, 2, 1).unsqueeze(-1),  # [1, 768, 256, 1]
-        size=(condition_feats_v.shape[1], 1),                      # target size for (H, W)
-        mode='bilinear',                    # or 'nearest', 'linear'
-        align_corners=False
-    ).squeeze(-1).permute(0, 2, 1)
-    print(condition_feats_a_interpolated.shape)
-
-    condition_for_multimodal_self_attention = torch.cat([condition_feats_v.unsqueeze(1), condition_feats_a_interpolated.unsqueeze(1)], dim=1)
-    print(condition_for_multimodal_self_attention.shape)
-
-    #store_dict[f'condition_feats_va'] = torch.cat(store_dict[f'condition_feats_va'],dim=0)
     itm_rerank_num = model.config.itm_rerank_num
-    #itm_rerank_num = 30
-    #score_matrix = refine_score_matrix(store_dict[f'condition_feats_va'], input_ids, attention_mask, -area , model, itm_rerank_num, direction='forward')#-(area-video_similarity)
-    score_matrix = refine_score_matrix(condition_for_multimodal_self_attention, input_ids, attention_mask, -area , model, itm_rerank_num, direction='forward', gram_attention=True)#-(area-video_similarity)
+    
+    if run_cfg.test.nested_ret:
+        score_matrix = refine_score_matrix(store_dict[f'condition_feats_{run_cfg.test.modalities_itm.lower()}'], input_ids, attention_mask, -(area -sim_tv -sim_ta), model, itm_rerank_num, direction='forward')#-(area-video_similarity)
+    else:
+        score_matrix = refine_score_matrix(store_dict[f'condition_feats_{run_cfg.test.modalities_itm.lower()}'], input_ids, attention_mask, -area , model, itm_rerank_num, direction='forward')#-(area-video_similarity)
+
     log = compute_metric_ret(score_matrix, ids, ids_txt, direction='forward')
     log = {k.replace('forward','volume_ITM_T2D'): v for k,v in log.items()}
 
-    
-    #score_matrix = refine_score_matrix(store_dict[f'condition_feats_va'], input_ids, attention_mask, -area, model, itm_rerank_num, direction='backward') #-(area-video_similarity)
-    score_matrix = refine_score_matrix(condition_for_multimodal_self_attention, input_ids, attention_mask, -area, model, itm_rerank_num, direction='backward', gram_attention=True) #-(area-video_similarity)
+    if run_cfg.test.nested_ret:
+        score_matrix = refine_score_matrix(store_dict[f'condition_feats_{run_cfg.test.modalities_itm.lower()}'], input_ids, attention_mask, -(area -sim_tv -sim_ta), model, itm_rerank_num, direction='backward') #-(area-video_similarity)
+    else:
+        score_matrix = refine_score_matrix(store_dict[f'condition_feats_{run_cfg.test.modalities_itm.lower()}'], input_ids, attention_mask, -area, model, itm_rerank_num, direction='backward') #-(area-video_similarity)
+
+    #score_matrix = refine_score_matrix(condition_for_multimodal_self_attention, input_ids, attention_mask, -area, model, itm_rerank_num, direction='backward', gram_attention=True) #-(area-video_similarity)
     log2 = compute_metric_ret(score_matrix, ids, ids_txt, direction='backward')
     log2 = {k.replace('backward','volume_ITM_D2T'): v for k,v in log2.items()}
     log.update(log2)
@@ -337,50 +459,66 @@ def evaluate_ret(model, tasks, val_loader, global_step):
     cosine_AT = compute_metric_ret(cosine_AT, ids, ids_txt, direction='forward')
     val_log[f'cosine_AT'] = cosine_AT
 
+    gap_tv = compute_gap(feat_t, feat_v)
+    val_log[f'gap_tv'] = gap_tv
+
+    gap_ta = compute_gap(feat_t, feat_a)
+    val_log[f'gap_ta'] = gap_ta
+
+    gap_va = compute_gap(feat_v, feat_a)
+    val_log[f'gap_va'] = gap_va
+
+    mean_cosine_t = compute_mean_angular_value_of_a_modality(feat_t)
+    val_log[f'mean_cosine_t'] = mean_cosine_t
+
+    mean_cosine_v = compute_mean_angular_value_of_a_modality(feat_v)
+    val_log[f'mean_cosine_v'] = mean_cosine_v
+
+    mean_cosine_a = compute_mean_angular_value_of_a_modality(feat_a)
+    val_log[f'mean_cosine_a'] = mean_cosine_a
+
+    distance_true_pairs_tv = mean_distance_of_true_pairs(feat_t, feat_v)
+    val_log[f'distance_true_pairs_tv'] = distance_true_pairs_tv
+    distance_true_pairs_ta = mean_distance_of_true_pairs(feat_t, feat_a)
+    val_log[f'distance_true_pairs_ta'] = distance_true_pairs_ta
+    distance_true_pairs_va = mean_distance_of_true_pairs(feat_v, feat_a)
+    val_log[f'distance_true_pairs_va'] = distance_true_pairs_va
+
+    rmg_tv = compute_rmg(feat_t, feat_v)
+    val_log[f'rmg_tv'] = rmg_tv
+    rmg_ta = compute_rmg(feat_t, feat_a)
+    val_log[f'rmg_ta'] = rmg_ta
+    rmg_va = compute_rmg(feat_v, feat_a)
+    val_log[f'rmg_va'] = rmg_va
+
     print("Evaluation Results at step {}: {}".format(global_step, val_log))
     
-    ### compute itc_score
-    #for task in subtasks:
-    #    if  task == "tvas" or task == "tva":
-    #        continue
-    #    #store_dict[f'feat_cond_{task}'] =  torch.cat(store_dict[f'feat_cond_{task}'], dim = 0)
-    #    #store_dict[f'feat_cond_{task}'] = ddp_allgather(store_dict[f'feat_cond_{task}'])
-    #    if task=='tv':
-    #        score_matrix_t_cond = torch.matmul(feat_t, feat_v.permute(1,0))
-    #    elif task=='ta':
-    #        score_matrix_t_cond = torch.matmul(feat_t, feat_a.permute(1,0))
-    #    store_dict[f'score_matrix_t_cond_{task}'] = score_matrix_t_cond
-    #    log = compute_metric_ret(score_matrix_t_cond, ids, ids_txt, direction='forward')
-    #    log = {k.replace('forward','video'): v for k,v in log.items()}
-    #    if model.config.ret_bidirection_evaluation:
-    #        log2 = compute_metric_ret(score_matrix_t_cond, ids, ids_txt, direction='backward')
-    #        log2 = {k.replace('backward','txt'): v for k,v in log2.items()}
-    #        log.update(log2)
-#
-    #    val_log[f'ret_itc_{task}'] = log
-#
-#
-    ##### compute itm_score
-    #for task in subtasks:
-    #    if  task == "tvas" or task == "tva":
-    #        continue
-    #    if task!="tvas" and task!="tva":
-    #        store_dict[f'condition_feats_{task}'] = torch.cat(store_dict[f'condition_feats_{task}'],dim=0)
-    #    itm_rerank_num = model.config.itm_rerank_num
-    #    score_matrix = refine_score_matrix(store_dict[f'condition_feats_{task}'], input_ids, attention_mask, store_dict[f'score_matrix_t_cond_{task}'], model, itm_rerank_num, direction='forward')
-    #    log = compute_metric_ret(score_matrix, ids, ids_txt, direction='forward')
-    #    log = {k.replace('forward','video'): v for k,v in log.items()}
-#
-    #    if model.config.ret_bidirection_evaluation:
-    #        score_matrix = refine_score_matrix(store_dict[f'condition_feats_{task}'], input_ids, attention_mask, store_dict[f'score_matrix_t_cond_{task}'], model, itm_rerank_num, direction='backward')
-    #        log2 = compute_metric_ret(score_matrix, ids, ids_txt, direction='backward')
-    #        log2 = {k.replace('backward','txt'): v for k,v in log2.items()}
-    #        log.update(log2)
-#
-    #    val_log[f'ret_itm_{task}'] = log
-
     if dist.get_rank() == 0:
         wandb.log(val_log)
+
+    del val_log['s1-test']
+    del val_log['s2-test']
+    if 's3-test' in val_log:
+        del val_log['s3-test']
+    if 's4-test' in val_log:
+        del val_log['s4-test']
+    if 's5-test' in val_log:
+        del val_log['s5-test']
+    del val_log['gramian_value_true_samples']
+    del val_log['mean_gramian_value']
+    del val_log['distance_true_pairs_tv']
+    del val_log['distance_true_pairs_ta']
+    del val_log['distance_true_pairs_va']
+    del val_log['mean_cosine_a']
+    del val_log['mean_cosine_v']
+    del val_log['mean_cosine_t']
+    del val_log['rmg_tv']
+    del val_log['rmg_ta']
+    del val_log['rmg_va']
+    del val_log['gap_va']
+    del val_log['gap_ta']
+    del val_log['gap_tv']
+
         
     return val_log
 
@@ -483,6 +621,8 @@ def compute_metric_ret(score_matrix, ids, ids_txt, direction='forward'):
         v_meanR = torch.mean(rank).item() +1
  
         eval_log = {'forward_r1': round(vr_r1*100,1),
+                    'forward_r5': round(vr_r5*100,1),
+                    'forward_r10': round(vr_r10*100,1),
                     'forward_recall': f'{round(vr_r1*100,1)}/{round(vr_r5*100,1)}/{round(vr_r10*100,1)}',
                     'forward_ravg': round((vr_r1 + vr_r5 + vr_r10)/3 *100,1)
                    }
@@ -509,6 +649,8 @@ def compute_metric_ret(score_matrix, ids, ids_txt, direction='forward'):
 
         eval_log = {
                     'backward_r1': round(tr_r1*100,1),
+                    'backward_r5': round(tr_r5*100,1),
+                    'backward_r10': round(tr_r10*100,1),
                     'backward_recall': f'{round(tr_r1*100,1)}/{round(tr_r5*100,1)}/{round(tr_r10*100,1)}',
                     'backward_ravg': round((tr_r1 + tr_r5 + tr_r10)/3 *100,1)
                   }
@@ -540,6 +682,8 @@ def compute_metric_ret_area(score_matrix, ids, ids_txt, direction='forward'):
         v_meanR = torch.mean(rank).item() +1
  
         eval_log = {'forward_r1': round(vr_r1*100,1),
+                    'forward_r5': round(vr_r5*100,1),
+                    'forward_r10': round(vr_r10*100,1),
                     'forward_recall': f'{round(vr_r1*100,1)}/{round(vr_r5*100,1)}/{round(vr_r10*100,1)}',
                     'forward_ravg': round((vr_r1 + vr_r5 + vr_r10)/3 *100,1)
                    }
@@ -566,6 +710,8 @@ def compute_metric_ret_area(score_matrix, ids, ids_txt, direction='forward'):
 
         eval_log = {
                     'backward_r1': round(tr_r1*100,1),
+                    'backward_r5': round(tr_r5*100,1),
+                    'backward_r10': round(tr_r10*100,1),
                     'backward_recall': f'{round(tr_r1*100,1)}/{round(tr_r5*100,1)}/{round(tr_r10*100,1)}',
                     'backward_ravg': round((tr_r1 + tr_r5 + tr_r10)/3 *100,1)
                   }
