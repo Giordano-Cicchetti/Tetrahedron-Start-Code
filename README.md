@@ -41,24 +41,27 @@ The processed  pretrained_weights path should be as follows:
     │   │   └── EVA01_CLIP_g_14_psz14_s11B.pt
 ```
 
+## DATASET
 
+Download dataset and unzip it in your desired location.
+Change paths to file locations in the configuration file you want to use in pretraining.
+E.G. ./config/gram/finetune_cfg/retrieval-msrvtt.json
 
 ## TRAIN FROM SRATCH
-For example, if the cmd for finetuning retrieval model is as follows:
+If you want to pretrain a model from scratch on the MSRVTT dataset you should run the following command.
 
 ```
 python3 -m torch.distributed.launch \
 --nnodes 1 \
 --node_rank 0 \
---nproc_per_node 8 \
+--nproc_per_node 4 \
 --master_port 9834 \
 ./run.py \
---learning_rate 2e-5 \
 --checkpointing true \
 --first_eval true \
 --save_best true \
 --config ./config/gram/finetune_cfg/retrieval-msrvtt.json \
---output_dir $PATH-WHERE-TO-STORE-RESULTS \
+--output_dir /PATH/where/to/save/ckpt \
 ```
 
 TEST, add these lines
@@ -66,6 +69,14 @@ TEST, add these lines
 --mode 'testing' \
 --checkpoint /PATH/TO/SAVED_CHECKPOINT.pt
 ```
+
+
+## More on the code:
+All the losses are stored in the ./utils/volume.py python file.
+
+They are then used in ./model/gram.py from line 485 up to 586.
+
+The evaluation pipeline is on ./evaluation/evaluation_mm.py
 
 ## Citation
 
